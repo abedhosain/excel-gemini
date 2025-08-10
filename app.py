@@ -554,7 +554,7 @@ class EnhancedGeminiLLM:
     
     def __init__(self, api_key: str, data_retriever: DataRetriever):
         genai.configure(api_key=api_key)
-        self.model = "gemini-1.5-flash"
+        self.model = "gemini-2.0-flash"
         self.data_retriever = data_retriever
         
     def process_data_request(self, request: str) -> str:
