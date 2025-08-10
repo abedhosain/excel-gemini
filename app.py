@@ -186,7 +186,7 @@ class GeminiLLM:
     
     def __init__(self, api_key: str):
         genai.configure(api_key=api_key)
-        self.model = "gemini-1.5-flash"
+        self.model = "gemini-2.0-flash"
     
     def analyze_excel_data(self, excel_summary: str, user_query: str = "") -> str:
         """Send Excel data to Gemini for analysis"""
