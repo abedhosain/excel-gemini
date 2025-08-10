@@ -9,10 +9,9 @@ import tempfile
 import logging
 from io import BytesIO
 import pandas as pd
-from sklearn.feature_extraction.text import TfidfVectorizer
-from sklearn.metrics.pairwise import cosine_similarity
-import numpy as np
+import math
 import re
+from collections import Counter, defaultdict
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -26,15 +25,83 @@ st.set_page_config(
     initial_sidebar_state="expanded"
 )
 
-class TFIDFSearchEngine:
-    """TF-IDF based search engine for Excel data"""
+class SimpleTFIDFSearchEngine:
+    """Lightweight TF-IDF search engine without sklearn dependency"""
     
     def __init__(self):
-        self.vectorizer = None
-        self.tfidf_matrix = None
         self.documents = []
         self.row_metadata = []
+        self.vocabulary = {}
+        self.idf_scores = {}
+        self.tfidf_vectors = []
         
+    def _tokenize(self, text: str) -> List[str]:
+        """Simple tokenization"""
+        # Convert to lowercase, remove special chars, split on whitespace
+        text = re.sub(r'[^\w\s]', ' ', text.lower())
+        tokens = text.split()
+        # Remove common stop words
+        stop_words = {'the', 'a', 'an', 'and', 'or', 'but', 'in', 'on', 'at', 'to', 'for', 'of', 'with', 'by', 'is', 'are', 'was', 'were', 'be', 'been', 'have', 'has', 'had', 'do', 'does', 'did', 'will', 'would', 'could', 'should'}
+        return [token for token in tokens if token not in stop_words and len(token) > 1]
+    
+    def _compute_tf(self, tokens: List[str]) -> Dict[str, float]:
+        """Compute term frequency"""
+        tf = {}
+        total_tokens = len(tokens)
+        token_counts = Counter(tokens)
+        
+        for token, count in token_counts.items():
+            tf[token] = count / total_tokens
+        
+        return tf
+    
+    def _compute_idf(self) -> None:
+        """Compute inverse document frequency for all terms"""
+        doc_count = len(self.documents)
+        term_doc_count = defaultdict(int)
+        
+        # Count documents containing each term
+        for doc in self.documents:
+            tokens = self._tokenize(doc)
+            unique_tokens = set(tokens)
+            for token in unique_tokens:
+                term_doc_count[token] += 1
+        
+        # Compute IDF scores
+        for term, count in term_doc_count.items():
+            self.idf_scores[term] = math.log(doc_count / count)
+    
+    def _compute_tfidf_vector(self, tokens: List[str]) -> Dict[str, float]:
+        """Compute TF-IDF vector for a document"""
+        tf_scores = self._compute_tf(tokens)
+        tfidf_vector = {}
+        
+        for token in tf_scores:
+            if token in self.idf_scores:
+                tfidf_vector[token] = tf_scores[token] * self.idf_scores[token]
+        
+        return tfidf_vector
+    
+    def _cosine_similarity(self, vec1: Dict[str, float], vec2: Dict[str, float]) -> float:
+        """Compute cosine similarity between two TF-IDF vectors"""
+        # Get common terms
+        common_terms = set(vec1.keys()) & set(vec2.keys())
+        
+        if not common_terms:
+            return 0.0
+        
+        # Compute dot product
+        dot_product = sum(vec1[term] * vec2[term] for term in common_terms)
+        
+        # Compute magnitudes
+        mag1 = math.sqrt(sum(val**2 for val in vec1.values()))
+        mag2 = math.sqrt(sum(val**2 for val in vec2.values()))
+        
+        if mag1 == 0 or mag2 == 0:
+            return 0.0
+        
+        return dot_product / (mag1 * mag2)
+    
     def build_index(self, files_data: List[Dict[str, Any]]) -> None:
         """Build TF-IDF index from all Excel data"""
         self.documents = []
@@ -55,7 +122,7 @@ class TFIDFSearchEngine:
                     # Combine all cell values into a single text document
                     text_content = []
                     for header, value in row.items():
-                        if value and str(value).strip():
+                        if value and str(value).strip() and not header.startswith('_'):
                             text_content.append(f"{header}: {str(value)}")
                     
                     if text_content:
@@ -72,35 +139,43 @@ class TFIDFSearchEngine:
                         })
         
         if self.documents:
-            # Build TF-IDF matrix
-            self.vectorizer = TfidfVectorizer(
-                max_features=1000,
-                stop_words='english',
-                ngram_range=(1, 2),
-                min_df=1,
-                max_df=0.8
-            )
-            self.tfidf_matrix = self.vectorizer.fit_transform(self.documents)
+            # Compute IDF scores
+            self._compute_idf()
+            
+            # Compute TF-IDF vectors for all documents
+            self.tfidf_vectors = []
+            for doc in self.documents:
+                tokens = self._tokenize(doc)
+                tfidf_vector = self._compute_tfidf_vector(tokens)
+                self.tfidf_vectors.append(tfidf_vector)
     
     def search(self, query: str, top_k: int = 10) -> List[Dict[str, Any]]:
         """Search for relevant rows using TF-IDF similarity"""
-        if not self.vectorizer or not self.documents:
+        if not self.documents:
             return []
         
-        # Vectorize query
-        query_vector = self.vectorizer.transform([query])
+        # Compute TF-IDF vector for query
+        query_tokens = self._tokenize(query)
+        query_vector = self._compute_tfidf_vector(query_tokens)
+        
+        if not query_vector:
+            return []
         
         # Calculate similarities
-        similarities = cosine_similarity(query_vector, self.tfidf_matrix).flatten()
+        similarities = []
+        for i, doc_vector in enumerate(self.tfidf_vectors):
+            similarity = self._cosine_similarity(query_vector, doc_vector)
+            similarities.append((i, similarity))
+        
+        # Sort by similarity score (descending)
+        similarities.sort(key=lambda x: x[1], reverse=True)
         
         # Get top-k results
-        top_indices = similarities.argsort()[-top_k:][::-1]
-        
         results = []
-        for idx in top_indices:
-            if similarities[idx] > 0:  # Only include relevant results
+        for idx, similarity_score in similarities[:top_k]:
+            if similarity_score > 0:  # Only include relevant results
                 result = self.row_metadata[idx].copy()
-                result['similarity_score'] = float(similarities[idx])
+                result['similarity_score'] = similarity_score
                 result['matched_text'] = self.documents[idx]
                 results.append(result)
         
@@ -138,7 +213,7 @@ class ExcelProcessor:
     def __init__(self):
         self.max_rows_per_sheet = 100
         self.max_chars_per_cell = 500
-        self.search_engine = TFIDFSearchEngine()
+        self.search_engine = SimpleTFIDFSearchEngine()
         
     def read_excel_file(self, file_content: bytes, file_name: str) -> Dict[str, Any]:
         """Read Excel file from bytes content"""
@@ -357,9 +432,9 @@ class ExcelProcessor:
 class GeminiLLM:
     """Enhanced Gemini LLM integration with TF-IDF search"""
     
-    def __init__(self, api_key: str, search_engine: TFIDFSearchEngine = None):
+    def __init__(self, api_key: str, search_engine: SimpleTFIDFSearchEngine = None):
         genai.configure(api_key=api_key)
-        self.model = "gemini-2.0-flash"
+        self.model = "gemini-1.5-flash"
         self.search_engine = search_engine
     
     def analyze_excel_data(self, excel_summary: str, user_query: str = "", search_results: List[Dict] = None) -> str:
