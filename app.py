@@ -552,18 +552,17 @@ class ExcelProcessor:
             
         return stats
     
-    def create_enhanced_summary(self, files_data: List[Dict[str, Any]]) -> str:
-        """Create enhanced summary"""
+    def create_minimal_summary(self, files_data: List[Dict[str, Any]]) -> str:
+        """Create minimal summary - just structure info, no actual data"""
         summary_parts = []
         
-        summary_parts.append("=== CONVERSATIONAL EXCEL ANALYSIS ===")
-        summary_parts.append(f"Total files processed: {len(files_data)}")
-        summary_parts.append("🤖 AI can request specific data conversationally")
+        summary_parts.append("=== EXCEL FILES STRUCTURE ===")
+        summary_parts.append(f"Total files: {len(files_data)}")
         
-        # Build search index
+        # Build search index first
         self.search_engine.build_index(files_data)
         total_rows = len(self.search_engine.documents)
-        summary_parts.append(f"🔍 Total searchable rows: {total_rows}")
+        summary_parts.append(f"Total searchable rows: {total_rows}")
         
         for file_data in files_data:
             if 'error' in file_data:
@@ -582,31 +581,17 @@ class ExcelProcessor:
                 summary = sheet_data['summary']
                 summary_parts.append(f"\n   📊 SHEET: {sheet_name}")
                 summary_parts.append(f"      Dimensions: {summary['total_rows']} rows × {summary['total_columns']} columns")
-                summary_parts.append(f"      Headers: {', '.join(summary['headers'][:10])}")
+                summary_parts.append(f"      Available columns: {', '.join(summary['headers'][:15])}")  # Just column names, no data
                 
-                # Add column statistics
-                if 'column_stats' in summary:
-                    summary_parts.append("      Column Statistics:")
-                    for col, stats in list(summary['column_stats'].items())[:5]:
-                        if not col.startswith('_'):
-                            summary_parts.append(f"        {col}: {stats['non_empty_count']} values, {stats['unique_count']} unique")
-                
-                # Sample data with row numbers
-                if summary['sample_data']:
-                    summary_parts.append("      Sample rows:")
-                    for row in summary['sample_data'][:3]:
-                        row_num = row.get('_row_number', '?')
-                        clean_row = {k: str(v)[:40] for k, v in row.items() if not k.startswith('_') and v}
-                        summary_parts.append(f"        Row {row_num}: {clean_row}")
+                # NO SAMPLE DATA - LLM must request specific data
         
-        # Add instructions
-        summary_parts.append("\n💬 CONVERSATIONAL DATA REQUESTS:")
-        summary_parts.append("You can request specific data naturally like:")
-        summary_parts.append("- 'Show me row 5 from the balance sheet'")
-        summary_parts.append("- 'Get all values from the Revenue column'")
-        summary_parts.append("- 'Calculate the total of all expenses'")
-        summary_parts.append("- 'Find all entries related to accommodation'")
-        summary_parts.append("- 'What is the data in row 10?'")
+        summary_parts.append("\n💬 TO GET ACTUAL DATA:")
+        summary_parts.append("You must make specific requests like:")
+        summary_parts.append("- 'Show me row 5 from Balance Sheet'")
+        summary_parts.append("- 'Get values from Revenue column'") 
+        summary_parts.append("- 'Calculate total expenses'")
+        summary_parts.append("- 'Find accommodation related entries'")
+        summary_parts.append("\nNO DATA IS PROVIDED UPFRONT - YOU MUST REQUEST EVERYTHING!")
         
         return "\n".join(summary_parts)
 
@@ -621,33 +606,38 @@ class ConversationalGeminiLLM:
     def analyze_with_conversational_requests(self, excel_summary: str, user_query: str = "") -> str:
         """Analyze data by making conversational requests for specific information"""
         try:
-            # Initial analysis phase
+            # Minimal analysis phase - no data provided upfront
             initial_prompt = f"""
-You are an expert data analyst examining Excel files. You have access to this data summary:
+You are an expert data analyst. You have access to Excel files with this STRUCTURE ONLY (no actual data):
 
 {excel_summary}
 
-USER QUESTION: {user_query if user_query else "Please analyze this data comprehensively"}
+USER QUESTION: {user_query if user_query else "Please analyze this Excel data"}
 
-Based on this summary, you should ask for specific data points you need, just like asking a human assistant. 
+IMPORTANT: You have ONLY the file structure above. No actual data has been provided to you. To analyze anything, you MUST request specific data by making natural language requests.
 
-You can make natural requests like:
-- "Show me row 5 from the balance sheet"
-- "Get all values from the Revenue column"  
-- "Calculate the total of all expenses"
-- "Find all entries related to accommodation"
-- "What is in row 10 of the Income Statement?"
+You can request data like:
+- "Show me row 5 from Balance Sheet"
+- "Get all values from Revenue column"  
+- "Calculate total of all expenses"
+- "Find entries related to accommodation"
+- "What is in the first 3 rows of Income Statement?"
 
-Provide your initial analysis, then list 3-4 specific natural language requests you need to get deeper insights.
+Your task:
+1. Based on the user's question and file structure, identify what specific data you need
+2. Make 3-4 natural language requests to get that data
+3. DO NOT make any analysis without first requesting the actual data
 
 Format your response as:
-INITIAL ANALYSIS: [your analysis here]
+ANALYSIS PLAN: [explain what you want to analyze]
 
-DATA REQUESTS NEEDED:
-1. [natural request 1]
-2. [natural request 2]
-3. [natural request 3]
-4. [natural request 4]
+DATA REQUESTS:
+1. [specific request 1]
+2. [specific request 2] 
+3. [specific request 3]
+4. [specific request 4]
+
+Remember: You have NO actual data yet - you must request everything!
 """
 
             model = genai.GenerativeModel(self.model)
@@ -656,7 +646,7 @@ DATA REQUESTS NEEDED:
             # Extract data requests from the response
             data_requests = self._extract_natural_requests(initial_response.text)
             
-            # Process each request and get specific data
+            # Process each request and get ONLY the specific data requested
             retrieved_data = ""
             if data_requests:
                 retrieved_data = "\n📋 SPECIFIC DATA RETRIEVED:\n"
@@ -668,38 +658,42 @@ DATA REQUESTS NEEDED:
                     formatted_result = self._format_conversational_result(result)
                     retrieved_data += f"Response: {formatted_result}\n"
             
-            # Final analysis with retrieved data
+            # Final analysis with ONLY the retrieved data
             if retrieved_data:
                 final_prompt = f"""
-Here is your initial analysis:
+You are a data analyst. Here is what you requested and received:
+
+YOUR INITIAL PLAN:
 {initial_response.text}
 
-Here is the specific data you requested:
+ACTUAL DATA YOU REQUESTED AND RECEIVED:
 {retrieved_data}
 
-Now provide a comprehensive final analysis that:
-1. Updates your insights based on the specific data retrieved
-2. Provides exact numbers, values, and locations  
-3. Points out specific findings with precise references
-4. Makes data-driven recommendations
-5. Highlights any data quality issues you found
+Now provide comprehensive analysis using ONLY the specific data above. Do not assume any other data exists.
 
-Be specific and reference the exact data points you retrieved.
+Provide:
+1. Key insights from the specific data retrieved
+2. Exact numbers and values with their locations
+3. Specific findings with precise references
+4. Data-driven recommendations based only on what you received
+5. If you need more data for better analysis, mention what additional requests would help
+
+Be specific and reference only the exact data points you retrieved above.
 """
                 
                 final_response = model.generate_content(final_prompt)
                 
                 return f"""
-🔍 INITIAL ANALYSIS:
+🎯 ANALYSIS APPROACH:
 {initial_response.text}
 
 {retrieved_data}
 
-📊 ENHANCED ANALYSIS WITH SPECIFIC DATA:
+📊 ANALYSIS BASED ON RETRIEVED DATA:
 {final_response.text}
 """
             else:
-                return initial_response.text
+                return f"{initial_response.text}\n\n❌ No data was successfully retrieved. Please try different requests."
                 
         except Exception as e:
             logger.error(f"Error in conversational analysis: {str(e)}")
