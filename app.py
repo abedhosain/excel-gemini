@@ -19,7 +19,7 @@ logger = logging.getLogger(__name__)
 
 # Page config
 st.set_page_config(
-    page_title="📊 Excel AI Analyzer with TF-IDF",
+    page_title="📊 Excel AI Analyzer with Dynamic Retrieval",
     page_icon="📊",
     layout="wide",
     initial_sidebar_state="expanded"
@@ -180,32 +180,149 @@ class SimpleTFIDFSearchEngine:
                 results.append(result)
         
         return results
+
+class DataRetriever:
+    """Advanced data retrieval system for LLM requests"""
     
-    def get_column_data(self, column_name: str, file_name: str = None, sheet_name: str = None) -> List[Dict[str, Any]]:
-        """Get all data from a specific column"""
-        results = []
+    def __init__(self, excel_processor: 'ExcelProcessor'):
+        self.excel_processor = excel_processor
+        self.search_engine = excel_processor.search_engine
         
-        for metadata in self.row_metadata:
-            # Filter by file/sheet if specified
-            if file_name and metadata['file_name'] != file_name:
-                continue
-            if sheet_name and metadata['sheet_name'] != sheet_name:
-                continue
+    def get_specific_row(self, file_name: str, sheet_name: str, row_number: int) -> Dict[str, Any]:
+        """Get a specific row by number"""
+        try:
+            for metadata in self.search_engine.row_metadata:
+                if (metadata['file_name'] == file_name and 
+                    metadata['sheet_name'] == sheet_name and 
+                    metadata['row_data'].get('_row_number') == row_number):
+                    return {
+                        'success': True,
+                        'data': metadata['row_data'],
+                        'location': f"File: {file_name}, Sheet: {sheet_name}, Row: {row_number}"
+                    }
+            return {'success': False, 'error': f"Row {row_number} not found in {sheet_name}"}
+        except Exception as e:
+            return {'success': False, 'error': str(e)}
+    
+    def get_column_values(self, file_name: str, sheet_name: str, column_name: str) -> Dict[str, Any]:
+        """Get all values from a specific column"""
+        try:
+            values = []
+            for metadata in self.search_engine.row_metadata:
+                if (metadata['file_name'] == file_name and 
+                    metadata['sheet_name'] == sheet_name):
+                    row_data = metadata['row_data']
+                    if column_name in row_data and row_data[column_name]:
+                        values.append({
+                            'row_number': row_data.get('_row_number', '?'),
+                            'value': row_data[column_name]
+                        })
             
-            # Check if column exists and has data
-            row_data = metadata['row_data']
-            if column_name in row_data and row_data[column_name]:
-                result = {
-                    'file_name': metadata['file_name'],
-                    'sheet_name': metadata['sheet_name'],
-                    'row_index': metadata['row_index'],
-                    'column_name': column_name,
-                    'value': row_data[column_name],
-                    'full_row': row_data
+            return {
+                'success': True,
+                'data': values,
+                'count': len(values),
+                'location': f"File: {file_name}, Sheet: {sheet_name}, Column: {column_name}"
+            }
+        except Exception as e:
+            return {'success': False, 'error': str(e)}
+    
+    def get_sheet_summary(self, file_name: str, sheet_name: str) -> Dict[str, Any]:
+        """Get complete summary of a sheet"""
+        try:
+            for file_data in st.session_state.files_data:
+                if file_data['file_name'] == file_name:
+                    if sheet_name in file_data['sheets']:
+                        sheet_data = file_data['sheets'][sheet_name]
+                        return {
+                            'success': True,
+                            'summary': sheet_data['summary'],
+                            'sample_data': sheet_data['data'][:10],  # First 10 rows
+                            'location': f"File: {file_name}, Sheet: {sheet_name}"
+                        }
+            return {'success': False, 'error': f"Sheet {sheet_name} not found in {file_name}"}
+        except Exception as e:
+            return {'success': False, 'error': str(e)}
+    
+    def calculate_column_statistics(self, file_name: str, sheet_name: str, column_name: str) -> Dict[str, Any]:
+        """Calculate statistics for a numeric column"""
+        try:
+            values = []
+            for metadata in self.search_engine.row_metadata:
+                if (metadata['file_name'] == file_name and 
+                    metadata['sheet_name'] == sheet_name):
+                    row_data = metadata['row_data']
+                    if column_name in row_data and row_data[column_name]:
+                        try:
+                            # Try to convert to float
+                            val = float(str(row_data[column_name]).replace(',', ''))
+                            values.append(val)
+                        except:
+                            continue
+            
+            if not values:
+                return {'success': False, 'error': f"No numeric values found in column {column_name}"}
+            
+            stats = {
+                'count': len(values),
+                'sum': sum(values),
+                'average': sum(values) / len(values),
+                'min': min(values),
+                'max': max(values),
+                'median': sorted(values)[len(values)//2]
+            }
+            
+            return {
+                'success': True,
+                'statistics': stats,
+                'location': f"File: {file_name}, Sheet: {sheet_name}, Column: {column_name}"
+            }
+        except Exception as e:
+            return {'success': False, 'error': str(e)}
+    
+    def search_and_aggregate(self, query: str, operation: str = 'list') -> Dict[str, Any]:
+        """Search for data and perform aggregation"""
+        try:
+            search_results = self.search_engine.search(query, top_k=50)
+            
+            if not search_results:
+                return {'success': False, 'error': f"No results found for query: {query}"}
+            
+            if operation == 'list':
+                return {
+                    'success': True,
+                    'results': search_results[:10],  # Top 10 results
+                    'total_found': len(search_results)
                 }
-                results.append(result)
-        
-        return results
+            elif operation == 'sum':
+                # Try to sum numeric values from search results
+                total = 0
+                count = 0
+                for result in search_results:
+                    for key, value in result['row_data'].items():
+                        if not key.startswith('_'):
+                            try:
+                                num_val = float(str(value).replace(',', ''))
+                                total += num_val
+                                count += 1
+                            except:
+                                continue
+                
+                return {
+                    'success': True,
+                    'sum': total,
+                    'values_counted': count,
+                    'query': query
+                }
+            elif operation == 'count':
+                return {
+                    'success': True,
+                    'count': len(search_results),
+                    'query': query
+                }
+                
+        except Exception as e:
+            return {'success': False, 'error': str(e)}
 
 class ExcelProcessor:
     """Enhanced Excel file processor with TF-IDF capabilities"""
@@ -376,9 +493,10 @@ class ExcelProcessor:
         """Create enhanced summary with TF-IDF search capabilities"""
         summary_parts = []
         
-        summary_parts.append("=== ENHANCED EXCEL ANALYSIS WITH TF-IDF SEARCH ===")
+        summary_parts.append("=== ENHANCED EXCEL ANALYSIS WITH DYNAMIC DATA RETRIEVAL ===")
         summary_parts.append(f"Total files processed: {len(files_data)}")
         summary_parts.append("📊 Data is indexed and searchable using TF-IDF similarity")
+        summary_parts.append("🎯 LLM can request specific rows, columns, and calculations dynamically")
         
         # Build search index
         self.search_engine.build_index(files_data)
@@ -419,73 +537,185 @@ class ExcelProcessor:
                         clean_row = {k: str(v)[:40] for k, v in row.items() if not k.startswith('_') and v}
                         summary_parts.append(f"        Row {row_num}: {clean_row}")
         
-        # Add search instructions
-        summary_parts.append("\n🔍 SEARCH CAPABILITIES:")
-        summary_parts.append("You can now search for specific data using:")
-        summary_parts.append("- Natural language queries (e.g., 'sales data from Q1')")
-        summary_parts.append("- Column-specific searches (e.g., 'revenue numbers')")
-        summary_parts.append("- Content-based similarity matching")
-        summary_parts.append("- Exact row/column retrieval by name")
+        # Add dynamic retrieval instructions
+        summary_parts.append("\n🎯 DYNAMIC DATA RETRIEVAL CAPABILITIES:")
+        summary_parts.append("You can request specific data during analysis using:")
+        summary_parts.append("- GET_ROW filename sheetname row_number - Get specific row data")
+        summary_parts.append("- GET_COLUMN filename sheetname column_name - Get all values from a column")
+        summary_parts.append("- GET_STATS filename sheetname column_name - Calculate statistics for numeric column")
+        summary_parts.append("- SEARCH query_text - Search for specific data using TF-IDF")
+        summary_parts.append("- SUM query_text - Search and sum numeric values")
+        summary_parts.append("- Natural language: 'get row 5 from balance sheet', 'calculate total expenses'")
         
         return "\n".join(summary_parts)
 
-class GeminiLLM:
-    """Enhanced Gemini LLM integration with TF-IDF search"""
+class EnhancedGeminiLLM:
+    """Enhanced Gemini LLM with dynamic data retrieval capabilities"""
     
-    def __init__(self, api_key: str, search_engine: SimpleTFIDFSearchEngine = None):
+    def __init__(self, api_key: str, data_retriever: DataRetriever):
         genai.configure(api_key=api_key)
         self.model = "gemini-1.5-flash"
-        self.search_engine = search_engine
-    
-    def analyze_excel_data(self, excel_summary: str, user_query: str = "", search_results: List[Dict] = None) -> str:
-        """Enhanced analysis with search results"""
+        self.data_retriever = data_retriever
+        
+    def process_data_request(self, request: str) -> str:
+        """Process LLM data requests and return formatted results"""
         try:
-            # Build enhanced prompt with search capabilities
-            search_context = ""
-            if search_results:
-                search_context = "\n🔍 RELEVANT SEARCH RESULTS:\n"
-                for i, result in enumerate(search_results[:5], 1):
-                    search_context += f"Result {i} (Score: {result['similarity_score']:.3f}):\n"
-                    search_context += f"  File: {result['file_name']}, Sheet: {result['sheet_name']}, Row: {result['row_index'] + 1}\n"
-                    search_context += f"  Data: {result['row_data']}\n\n"
+            # Parse common request patterns
+            request_lower = request.lower()
             
-            prompt = f"""
-You are an expert data analyst with TF-IDF search capabilities. You can search through Excel data intelligently.
+            # Pattern 1: Get specific row
+            if 'row' in request_lower and any(num.isdigit() for num in request.split()):
+                # Extract row number
+                row_num = None
+                for part in request.split():
+                    if part.isdigit():
+                        row_num = int(part)
+                        break
+                
+                if row_num and st.session_state.files_data:
+                    # Use first available file/sheet for demo
+                    file_name = st.session_state.files_data[0]['file_name']
+                    sheet_name = list(st.session_state.files_data[0]['sheets'].keys())[0]
+                    result = self.data_retriever.get_specific_row(file_name, sheet_name, row_num)
+                    return self._format_result(result)
+            
+            # Pattern 2: Get column data
+            elif 'column' in request_lower:
+                result = self.data_retriever.search_and_aggregate(request, 'list')
+                return self._format_result(result)
+            
+            # Pattern 3: Calculate statistics
+            elif any(word in request_lower for word in ['sum', 'total', 'average', 'statistics', 'calculate']):
+                result = self.data_retriever.search_and_aggregate(request, 'sum')
+                return self._format_result(result)
+            
+            # Pattern 4: Search and list
+            else:
+                result = self.data_retriever.search_and_aggregate(request, 'list')
+                return self._format_result(result)
+                
+        except Exception as e:
+            return f"Error processing request: {str(e)}"
+    
+    def _format_result(self, result: Dict[str, Any]) -> str:
+        """Format data retrieval results for LLM"""
+        if not result.get('success', False):
+            return f"❌ Error: {result.get('error', 'Unknown error')}"
+        
+        formatted = "✅ Data Retrieved Successfully:\n\n"
+        
+        if 'data' in result:
+            if isinstance(result['data'], list):
+                formatted += f"📊 Found {len(result['data'])} items:\n"
+                for i, item in enumerate(result['data'][:5], 1):  # Show first 5
+                    formatted += f"{i}. {item}\n"
+                if len(result['data']) > 5:
+                    formatted += f"... and {len(result['data']) - 5} more items\n"
+            else:
+                formatted += f"📊 Data: {result['data']}\n"
+        
+        if 'statistics' in result:
+            stats = result['statistics']
+            formatted += f"📈 Statistics:\n"
+            formatted += f"  • Count: {stats['count']}\n"
+            formatted += f"  • Sum: {stats['sum']:,.2f}\n"
+            formatted += f"  • Average: {stats['average']:,.2f}\n"
+            formatted += f"  • Min: {stats['min']:,.2f}\n"
+            formatted += f"  • Max: {stats['max']:,.2f}\n"
+        
+        if 'results' in result:
+            formatted += f"🔍 Search Results ({result.get('total_found', 0)} total):\n"
+            for i, res in enumerate(result['results'][:3], 1):
+                formatted += f"{i}. File: {res['file_name']}, Sheet: {res['sheet_name']}, Row: {res['row_index']+1}\n"
+                formatted += f"   Score: {res['similarity_score']:.3f}\n"
+                # Show a few key-value pairs
+                row_preview = {k: v for k, v in list(res['row_data'].items())[:3] if not k.startswith('_') and v}
+                formatted += f"   Data: {row_preview}\n\n"
+        
+        if 'location' in result:
+            formatted += f"📍 Location: {result['location']}\n"
+            
+        return formatted
+    
+    def analyze_with_dynamic_retrieval(self, excel_summary: str, user_query: str = "") -> str:
+        """Enhanced analysis with dynamic data retrieval"""
+        try:
+            # First, perform initial analysis
+            initial_prompt = f"""
+You are an expert data analyst with dynamic data retrieval capabilities. 
 
 EXCEL DATA SUMMARY:
 {excel_summary}
 
-{search_context}
+USER QUERY: {user_query if user_query else "Provide comprehensive analysis"}
 
-USER QUERY: {user_query if user_query else "Provide comprehensive analysis with search examples"}
+Based on this summary, you can request specific data using these commands:
+- "GET_ROW file_name sheet_name row_number" - Get specific row data
+- "GET_COLUMN file_name sheet_name column_name" - Get all values from a column  
+- "GET_STATS file_name sheet_name column_name" - Calculate statistics for numeric column
+- "SEARCH query_text" - Search for specific data using TF-IDF
+- "SUM query_text" - Search and sum numeric values
 
-🔍 SEARCH CAPABILITIES:
-- You can search for specific rows/data using natural language
-- TF-IDF similarity matching finds relevant content
-- You can access any column or row data on demand
-- Search results include row numbers and exact locations
+Please provide your initial analysis, and if you need specific data to give better insights, format your requests clearly using the commands above.
 
-ANALYSIS REQUIREMENTS:
-1. Key insights from the data
-2. Data quality observations
-3. Patterns or trends you notice
-4. Recommendations for further analysis
-5. Examples of how to search this data
-6. Specific actionable insights
-
-If the user asks about specific data, suggest relevant search terms or demonstrate how to find it.
-
-Be specific, actionable, and show how the search functionality can help explore the data further.
+Focus on:
+1. Initial insights from the summary
+2. Specific data requests you need to provide deeper analysis
+3. What patterns you want to investigate further
 """
 
             model = genai.GenerativeModel(self.model)
-            response = model.generate_content(prompt)
+            initial_response = model.generate_content(initial_prompt)
             
-            return response.text
+            # Parse response for data requests
+            data_requests = self._parse_data_requests(initial_response.text)
+            
+            # Process data requests
+            retrieved_data = ""
+            if data_requests:
+                retrieved_data = "\n🔍 RETRIEVED DATA:\n"
+                for request in data_requests[:3]:  # Limit to 3 requests to avoid long responses
+                    result = self.process_data_request(request)
+                    retrieved_data += f"\nRequest: {request}\n{result}\n"
+            
+            # Generate final analysis with retrieved data
+            if retrieved_data:
+                final_prompt = f"""
+Based on your initial analysis and the retrieved data below, provide a comprehensive final analysis:
+
+INITIAL ANALYSIS:
+{initial_response.text}
+
+{retrieved_data}
+
+Now provide:
+1. Updated insights based on the retrieved data
+2. Specific findings with exact numbers and locations
+3. Data quality observations with examples
+4. Actionable recommendations
+5. Further investigation suggestions
+"""
+                final_response = model.generate_content(final_prompt)
+                
+                return f"{initial_response.text}\n\n{retrieved_data}\n\n🔄 ENHANCED ANALYSIS:\n{final_response.text}"
+            else:
+                return initial_response.text
                 
         except Exception as e:
-            logger.error(f"Error calling Gemini API: {str(e)}")
-            return f"Error analyzing data with Gemini: {str(e)}"
+            logger.error(f"Error in dynamic analysis: {str(e)}")
+            return f"Error in analysis: {str(e)}"
+    
+    def _parse_data_requests(self, text: str) -> List[str]:
+        """Parse data requests from LLM response"""
+        requests = []
+        lines = text.split('\n')
+        
+        for line in lines:
+            line = line.strip()
+            if any(cmd in line.upper() for cmd in ['GET_ROW', 'GET_COLUMN', 'GET_STATS', 'SEARCH', 'SUM']):
+                requests.append(line)
+        
+        return requests
 
 # Initialize session state
 if 'files_data' not in st.session_state:
@@ -498,10 +728,12 @@ if 'search_results' not in st.session_state:
     st.session_state.search_results = []
 if 'excel_processor' not in st.session_state:
     st.session_state.excel_processor = ExcelProcessor()
+if 'data_retriever' not in st.session_state:
+    st.session_state.data_retriever = None
 
 # Main App
 def main():
-    st.title("📊 Excel AI Analyzer with TF-IDF Search")
+    st.title("📊 Excel AI Analyzer with Dynamic Data Retrieval")
     st.markdown("Upload Excel files, build searchable index, and get AI insights with intelligent data retrieval!")
     
     # Sidebar for configuration
@@ -561,6 +793,53 @@ def main():
                             st.json(result['row_data'], expanded=False)
                 else:
                     st.warning("No results found")
+            
+            # Advanced Data Retrieval Section
+            st.subheader("🎯 Advanced Data Retrieval")
+            
+            if st.session_state.data_retriever:
+                # File selector
+                file_options = [f['file_name'] for f in st.session_state.files_data if 'error' not in f]
+                selected_file = st.selectbox("Select File:", file_options, key="sidebar_file")
+                
+                if selected_file:
+                    # Sheet selector
+                    file_data = next(f for f in st.session_state.files_data if f.get('file_name') == selected_file)
+                    sheet_options = list(file_data['sheets'].keys())
+                    selected_sheet = st.selectbox("Select Sheet:", sheet_options, key="sidebar_sheet")
+                    
+                    # Quick data retrieval buttons
+                    col1, col2 = st.columns(2)
+                    
+                    with col1:
+                        if st.button("📊 Get Sheet Summary", key="get_summary"):
+                            result = st.session_state.data_retriever.get_sheet_summary(selected_file, selected_sheet)
+                            st.json(result, expanded=False)
+                    
+                    with col2:
+                        row_number = st.number_input("Row #:", min_value=1, value=1, key="row_input")
+                        if st.button("📄 Get Row", key="get_row"):
+                            result = st.session_state.data_retriever.get_specific_row(selected_file, selected_sheet, row_number)
+                            st.json(result, expanded=False)
+                    
+                    # Column analysis
+                    if selected_sheet and selected_file:
+                        file_data = next(f for f in st.session_state.files_data if f.get('file_name') == selected_file)
+                        if selected_sheet in file_data['sheets']:
+                            headers = file_data['sheets'][selected_sheet]['summary'].get('headers', [])
+                            if headers:
+                                selected_column = st.selectbox("Select Column:", headers, key="sidebar_column")
+                                
+                                col1, col2 = st.columns(2)
+                                with col1:
+                                    if st.button("📈 Get Column", key="get_column"):
+                                        result = st.session_state.data_retriever.get_column_values(selected_file, selected_sheet, selected_column)
+                                        st.json(result, expanded=False)
+                                
+                                with col2:
+                                    if st.button("🔢 Calculate Stats", key="get_stats"):
+                                        result = st.session_state.data_retriever.calculate_column_statistics(selected_file, selected_sheet, selected_column)
+                                        st.json(result, expanded=False)
         else:
             st.info("Process files first to enable search")
         
@@ -571,6 +850,7 @@ def main():
             for key in ['files_data', 'excel_summary', 'llm_analysis', 'search_results']:
                 st.session_state[key] = [] if 'results' in key or 'data' in key else ""
             st.session_state.excel_processor = ExcelProcessor()
+            st.session_state.data_retriever = None
             st.rerun()
     
     # Main content area
@@ -618,7 +898,7 @@ def main():
             "🤖 AI Analysis",
             type="primary",
             disabled=not (st.session_state.excel_summary and api_key),
-            help="Get AI insights from processed data"
+            help="Get AI insights with dynamic data retrieval"
         )
     
     with col3:
@@ -652,27 +932,29 @@ def main():
             st.session_state.files_data = files_data
             st.session_state.excel_summary = st.session_state.excel_processor.create_enhanced_summary(files_data)
             
+            # Initialize data retriever
+            st.session_state.data_retriever = DataRetriever(st.session_state.excel_processor)
+            
             progress_bar.progress(1.0)
-            status_text.text("✅ Processing complete! TF-IDF index built.")
+            status_text.text("✅ Processing complete! TF-IDF index and data retriever ready.")
             
             st.success(f"Successfully processed {len(files_data)} files with {len(st.session_state.excel_processor.search_engine.documents)} searchable rows!")
     
-    # AI Analysis
+    # AI Analysis with Dynamic Retrieval
     if analyze_button and st.session_state.excel_summary and api_key:
-        with st.spinner("🤖 Analyzing with AI..."):
+        with st.spinner("🤖 Analyzing with AI and dynamic data retrieval..."):
             try:
-                gemini_llm = GeminiLLM(api_key, st.session_state.excel_processor.search_engine)
+                if not st.session_state.data_retriever:
+                    st.session_state.data_retriever = DataRetriever(st.session_state.excel_processor)
                 
-                # Include search results if available
-                search_results = st.session_state.search_results if st.session_state.search_results else None
+                enhanced_llm = EnhancedGeminiLLM(api_key, st.session_state.data_retriever)
                 
-                analysis = gemini_llm.analyze_excel_data(
+                analysis = enhanced_llm.analyze_with_dynamic_retrieval(
                     st.session_state.excel_summary, 
-                    user_query,
-                    search_results
+                    user_query
                 )
                 st.session_state.llm_analysis = analysis
-                st.success("✅ AI analysis complete!")
+                st.success("✅ AI analysis with dynamic data retrieval complete!")
             except Exception as e:
                 st.error(f"❌ Error: {str(e)}")
     
@@ -681,11 +963,11 @@ def main():
         st.divider()
         st.header("📊 Results")
         
-        tab1, tab2, tab3, tab4 = st.tabs(["📋 Data Summary", "🤖 AI Analysis", "🔍 Search Results", "📈 Row Browser"])
+        tab1, tab2, tab3, tab4, tab5 = st.tabs(["📋 Data Summary", "🤖 AI Analysis", "🔍 Search Results", "🎯 Data Retrieval", "📈 Row Browser"])
         
         with tab1:
             if st.session_state.excel_summary:
-                st.subheader("📊 Enhanced Data Summary with TF-IDF Index")
+                st.subheader("📊 Enhanced Data Summary with Dynamic Retrieval")
                 st.text_area(
                     "Processed data summary",
                     value=st.session_state.excel_summary,
@@ -696,7 +978,7 @@ def main():
                 st.download_button(
                     label="📥 Download Summary",
                     data=st.session_state.excel_summary,
-                    file_name="excel_summary_with_tfidf.txt",
+                    file_name="excel_summary_with_dynamic_retrieval.txt",
                     mime="text/plain"
                 )
             else:
@@ -704,13 +986,13 @@ def main():
         
         with tab2:
             if st.session_state.llm_analysis:
-                st.subheader("🤖 AI Analysis with Search Context")
+                st.subheader("🤖 AI Analysis with Dynamic Data Retrieval")
                 st.markdown(st.session_state.llm_analysis)
                 
                 st.download_button(
                     label="📥 Download Analysis",
                     data=st.session_state.llm_analysis,
-                    file_name="ai_analysis.txt",
+                    file_name="ai_analysis_with_retrieval.txt",
                     mime="text/plain"
                 )
             else:
@@ -738,6 +1020,103 @@ def main():
                 st.info("👆 Use the search feature in the sidebar")
         
         with tab4:
+            if st.session_state.data_retriever:
+                st.subheader("🎯 Interactive Data Retrieval")
+                st.markdown("Test the LLM's data retrieval capabilities manually:")
+                
+                # Manual data request interface
+                col1, col2 = st.columns([2, 1])
+                
+                with col1:
+                    manual_request = st.text_input(
+                        "Enter data request:",
+                        placeholder="e.g., get row 5 from balance sheet, sum all expenses, find accommodation costs",
+                        key="manual_request"
+                    )
+                
+                with col2:
+                    if st.button("📊 Execute Request", key="execute_request"):
+                        if manual_request and st.session_state.data_retriever:
+                            with st.spinner("Processing request..."):
+                                enhanced_llm = EnhancedGeminiLLM("dummy", st.session_state.data_retriever)
+                                result = enhanced_llm.process_data_request(manual_request)
+                                st.markdown("**Result:**")
+                                st.markdown(result)
+                
+                st.divider()
+                
+                # Predefined quick actions
+                st.subheader("🚀 Quick Actions")
+                
+                if st.session_state.files_data:
+                    file_options = [f['file_name'] for f in st.session_state.files_data if 'error' not in f]
+                    
+                    if file_options:
+                        selected_file = st.selectbox("Choose file for quick actions:", file_options, key="quick_file")
+                        file_data = next(f for f in st.session_state.files_data if f.get('file_name') == selected_file)
+                        sheet_options = list(file_data['sheets'].keys())
+                        
+                        selected_sheet = st.selectbox("Choose sheet:", sheet_options, key="quick_sheet")
+                        
+                        col1, col2, col3 = st.columns(3)
+                        
+                        with col1:
+                            if st.button("📊 Analyze Sheet", key="analyze_sheet"):
+                                result = st.session_state.data_retriever.get_sheet_summary(selected_file, selected_sheet)
+                                if result['success']:
+                                    st.json(result['summary'])
+                                    if result.get('sample_data'):
+                                        st.subheader("Sample Data:")
+                                        df = pd.DataFrame(result['sample_data'])
+                                        st.dataframe(df)
+                                else:
+                                    st.error(result['error'])
+                        
+                        with col2:
+                            row_num = st.number_input("Row number:", min_value=1, value=1, key="quick_row")
+                            if st.button("📄 Get Row Data", key="get_row_data"):
+                                result = st.session_state.data_retriever.get_specific_row(selected_file, selected_sheet, row_num)
+                                if result['success']:
+                                    st.json(result['data'])
+                                else:
+                                    st.error(result['error'])
+                        
+                        with col3:
+                            # Column selector
+                            if selected_sheet in file_data['sheets']:
+                                headers = file_data['sheets'][selected_sheet]['summary'].get('headers', [])
+                                if headers:
+                                    selected_col = st.selectbox("Column:", headers, key="quick_col")
+                                    if st.button("📈 Column Stats", key="col_stats"):
+                                        result = st.session_state.data_retriever.calculate_column_statistics(selected_file, selected_sheet, selected_col)
+                                        if result['success']:
+                                            st.json(result['statistics'])
+                                        else:
+                                            st.error(result['error'])
+                
+                st.divider()
+                
+                # Command examples
+                st.subheader("💡 Command Examples")
+                st.markdown("""
+                **LLM can request data using these patterns:**
+                
+                - `GET_ROW filename sheetname 5` - Get specific row
+                - `GET_COLUMN filename sheetname Amount` - Get all values from Amount column
+                - `GET_STATS filename sheetname Revenue` - Calculate statistics for Revenue column
+                - `SEARCH accommodation expenses` - Search for accommodation-related data
+                - `SUM total expenses august` - Search and sum expense values
+                
+                **Natural language examples:**
+                - "Show me row 10 from the balance sheet"
+                - "Calculate total revenue from all sheets"
+                - "Find all accommodation expenses"
+                - "Get statistics for the Amount column"
+                """)
+            else:
+                st.info("Process Excel files first to enable data retrieval")
+        
+        with tab5:
             if st.session_state.files_data:
                 st.subheader("📈 Row Browser - View All Data")
                 
