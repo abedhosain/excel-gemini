@@ -4,6 +4,7 @@ import os
 from typing import List, Dict, Any, Optional, Tuple
 import openpyxl
 from openpyxl import load_workbook
+from openpyxl.utils import get_column_letter
 import google.generativeai as genai
 import tempfile
 import logging
@@ -12,6 +13,7 @@ import pandas as pd
 import math
 import re
 from collections import Counter, defaultdict
+from datetime import datetime
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -19,23 +21,25 @@ logger = logging.getLogger(__name__)
 
 # Page config
 st.set_page_config(
-    page_title="📊 On-Demand Excel AI Analyzer",
+    page_title="📊 AI Excel Editor - Gemini Instructor",
     page_icon="📊",
     layout="wide",
     initial_sidebar_state="expanded"
 )
 
-class SimpleTFIDFSearchEngine:
-    """Lightweight TF-IDF search engine for on-demand data retrieval"""
+class ExcelSearchEngine:
+    """Advanced search engine for Excel data with editing capabilities"""
     
     def __init__(self):
-        self.documents = []
-        self.row_metadata = []
+        self.workbooks = {}  # Store actual workbook objects
+        self.sheet_data = {}  # Store processed data for search
+        self.file_paths = {}  # Store temporary file paths
         self.idf_scores = {}
         self.tfidf_vectors = []
+        self.row_metadata = []
         
     def _tokenize(self, text: str) -> List[str]:
-        """Simple tokenization"""
+        """Advanced tokenization"""
         text = re.sub(r'[^\w\s]', ' ', text.lower())
         tokens = text.split()
         stop_words = {'the', 'a', 'an', 'and', 'or', 'but', 'in', 'on', 'at', 'to', 'for', 'of', 'with', 'by', 'is', 'are', 'was', 'were', 'be', 'been', 'have', 'has', 'had', 'do', 'does', 'did', 'will', 'would', 'could', 'should'}
@@ -45,6 +49,8 @@ class SimpleTFIDFSearchEngine:
         """Compute term frequency"""
         tf = {}
         total_tokens = len(tokens)
+        if total_tokens == 0:
+            return tf
         token_counts = Counter(tokens)
         
         for token, count in token_counts.items():
@@ -53,21 +59,134 @@ class SimpleTFIDFSearchEngine:
         return tf
     
     def _compute_idf(self) -> None:
-        """Compute inverse document frequency for all terms"""
-        doc_count = len(self.documents)
+        """Compute inverse document frequency"""
+        doc_count = len(self.row_metadata)
+        if doc_count == 0:
+            return
+            
         term_doc_count = defaultdict(int)
         
-        for doc in self.documents:
-            tokens = self._tokenize(doc)
+        for metadata in self.row_metadata:
+            doc_text = " ".join([f"{k}: {v}" for k, v in metadata['row_data'].items() 
+                               if not k.startswith('_') and v and str(v).strip()])
+            tokens = self._tokenize(doc_text)
             unique_tokens = set(tokens)
             for token in unique_tokens:
                 term_doc_count[token] += 1
         
         for term, count in term_doc_count.items():
-            self.idf_scores[term] = math.log(doc_count / count)
+            self.idf_scores[term] = math.log(doc_count / count) if count > 0 else 0
+    
+    def load_excel_files(self, uploaded_files) -> None:
+        """Load Excel files and build search index"""
+        self.workbooks = {}
+        self.sheet_data = {}
+        self.file_paths = {}
+        self.row_metadata = []
+        
+        for uploaded_file in uploaded_files:
+            # Save to temporary file
+            with tempfile.NamedTemporaryFile(suffix='.xlsx', delete=False) as tmp_file:
+                tmp_file.write(uploaded_file.read())
+                tmp_path = tmp_file.name
+            
+            self.file_paths[uploaded_file.name] = tmp_path
+            
+            # Load workbook
+            workbook = load_workbook(tmp_path, data_only=False)
+            self.workbooks[uploaded_file.name] = workbook
+            
+            # Process each sheet
+            file_sheets = {}
+            for sheet_name in workbook.sheetnames:
+                sheet = workbook[sheet_name]
+                sheet_data = self._process_sheet(sheet, uploaded_file.name, sheet_name)
+                file_sheets[sheet_name] = sheet_data
+            
+            self.sheet_data[uploaded_file.name] = file_sheets
+        
+        # Build search index
+        self._build_search_index()
+    
+    def _process_sheet(self, sheet, file_name: str, sheet_name: str) -> Dict[str, Any]:
+        """Process sheet and extract all data"""
+        try:
+            if sheet.max_row is None or sheet.max_row == 0:
+                return {'headers': [], 'data': [], 'max_row': 0, 'max_col': 0}
+            
+            max_row = sheet.max_row
+            max_col = sheet.max_column or 0
+            
+            # Extract headers (row 1)
+            headers = []
+            for col in range(1, max_col + 1):
+                cell_value = sheet.cell(row=1, column=col).value
+                if cell_value is not None:
+                    header = str(cell_value).strip()
+                    headers.append(header if header else f"Column_{col}")
+                else:
+                    headers.append(f"Column_{col}")
+            
+            # Extract all data
+            data_rows = []
+            for row_num in range(2, max_row + 1):
+                row_data = {}
+                has_data = False
+                
+                for col_num, header in enumerate(headers, 1):
+                    cell = sheet.cell(row=row_num, column=col_num)
+                    cell_value = cell.value
+                    
+                    if cell_value is not None:
+                        row_data[header] = str(cell_value).strip()
+                        has_data = True
+                    else:
+                        row_data[header] = ""
+                
+                if has_data:
+                    row_data['_row_number'] = row_num
+                    row_data['_file_name'] = file_name
+                    row_data['_sheet_name'] = sheet_name
+                    data_rows.append(row_data)
+                    
+                    # Add to metadata for search
+                    self.row_metadata.append({
+                        'file_name': file_name,
+                        'sheet_name': sheet_name,
+                        'row_number': row_num,
+                        'excel_row': row_num,  # Actual Excel row number
+                        'row_data': row_data,
+                        'headers': headers
+                    })
+            
+            return {
+                'headers': headers,
+                'data': data_rows,
+                'max_row': max_row,
+                'max_col': max_col
+            }
+            
+        except Exception as e:
+            logger.error(f"Error processing sheet {sheet_name}: {str(e)}")
+            return {'headers': [], 'data': [], 'max_row': 0, 'max_col': 0, 'error': str(e)}
+    
+    def _build_search_index(self) -> None:
+        """Build TF-IDF search index"""
+        if not self.row_metadata:
+            return
+            
+        self._compute_idf()
+        
+        self.tfidf_vectors = []
+        for metadata in self.row_metadata:
+            doc_text = " ".join([f"{k}: {v}" for k, v in metadata['row_data'].items() 
+                               if not k.startswith('_') and v and str(v).strip()])
+            tokens = self._tokenize(doc_text)
+            tfidf_vector = self._compute_tfidf_vector(tokens)
+            self.tfidf_vectors.append(tfidf_vector)
     
     def _compute_tfidf_vector(self, tokens: List[str]) -> Dict[str, float]:
-        """Compute TF-IDF vector for a document"""
+        """Compute TF-IDF vector"""
         tf_scores = self._compute_tf(tokens)
         tfidf_vector = {}
         
@@ -78,7 +197,7 @@ class SimpleTFIDFSearchEngine:
         return tfidf_vector
     
     def _cosine_similarity(self, vec1: Dict[str, float], vec2: Dict[str, float]) -> float:
-        """Compute cosine similarity between two TF-IDF vectors"""
+        """Compute cosine similarity"""
         common_terms = set(vec1.keys()) & set(vec2.keys())
         
         if not common_terms:
@@ -93,51 +212,9 @@ class SimpleTFIDFSearchEngine:
         
         return dot_product / (mag1 * mag2)
     
-    def build_index(self, files_data: List[Dict[str, Any]]) -> None:
-        """Build TF-IDF index from all Excel data"""
-        self.documents = []
-        self.row_metadata = []
-        
-        for file_data in files_data:
-            if 'error' in file_data:
-                continue
-                
-            file_name = file_data['file_name']
-            
-            for sheet_name, sheet_data in file_data['sheets'].items():
-                if 'error' in sheet_data:
-                    continue
-                
-                for row_idx, row in enumerate(sheet_data['data']):
-                    text_content = []
-                    for header, value in row.items():
-                        if value and str(value).strip() and not header.startswith('_'):
-                            text_content.append(f"{header}: {str(value)}")
-                    
-                    if text_content:
-                        document = " | ".join(text_content)
-                        self.documents.append(document)
-                        
-                        self.row_metadata.append({
-                            'file_name': file_name,
-                            'sheet_name': sheet_name,
-                            'row_index': row_idx,
-                            'row_data': row,
-                            'headers': list(row.keys())
-                        })
-        
-        if self.documents:
-            self._compute_idf()
-            
-            self.tfidf_vectors = []
-            for doc in self.documents:
-                tokens = self._tokenize(doc)
-                tfidf_vector = self._compute_tfidf_vector(tokens)
-                self.tfidf_vectors.append(tfidf_vector)
-    
     def search(self, query: str, top_k: int = 10) -> List[Dict[str, Any]]:
-        """Search for relevant rows using TF-IDF similarity"""
-        if not self.documents:
+        """Search for relevant rows"""
+        if not self.row_metadata:
             return []
         
         query_tokens = self._tokenize(query)
@@ -158,77 +235,117 @@ class SimpleTFIDFSearchEngine:
             if similarity_score > 0:
                 result = self.row_metadata[idx].copy()
                 result['similarity_score'] = similarity_score
-                result['matched_text'] = self.documents[idx]
                 results.append(result)
         
         return results
-
-class OnDemandDataEngine:
-    """Data engine that executes Gemini's search instructions"""
     
-    def __init__(self, excel_processor: 'ExcelProcessor'):
-        self.excel_processor = excel_processor
-        self.search_engine = excel_processor.search_engine
+    def get_sheet_dataframe(self, file_name: str, sheet_name: str) -> pd.DataFrame:
+        """Get sheet data as DataFrame for display"""
+        if file_name not in self.sheet_data or sheet_name not in self.sheet_data[file_name]:
+            return pd.DataFrame()
         
-    def execute_search_instruction(self, instruction: str) -> Dict[str, Any]:
-        """Execute search instruction from Gemini"""
+        sheet_data = self.sheet_data[file_name][sheet_name]
+        if not sheet_data['data']:
+            return pd.DataFrame()
+        
+        # Convert to DataFrame
+        df_data = []
+        for row in sheet_data['data']:
+            clean_row = {k: v for k, v in row.items() if not k.startswith('_')}
+            df_data.append(clean_row)
+        
+        return pd.DataFrame(df_data)
+    
+    def get_file_structure(self) -> Dict[str, Any]:
+        """Get structure of all loaded files"""
+        structure = {}
+        for file_name, sheets in self.sheet_data.items():
+            structure[file_name] = {}
+            for sheet_name, sheet_data in sheets.items():
+                structure[file_name][sheet_name] = {
+                    'headers': sheet_data['headers'],
+                    'row_count': len(sheet_data['data']),
+                    'max_row': sheet_data['max_row'],
+                    'max_col': sheet_data['max_col']
+                }
+        return structure
+
+class ExcelEditor:
+    """Excel editing engine that executes Gemini's instructions"""
+    
+    def __init__(self, search_engine: ExcelSearchEngine):
+        self.search_engine = search_engine
+        self.edit_history = []
+    
+    def execute_instruction(self, instruction: str) -> Dict[str, Any]:
+        """Execute editing instruction from Gemini"""
         try:
-            instruction_lower = instruction.lower().strip()
+            instruction = instruction.strip()
             
-            # Parse different types of search instructions
+            # Parse different instruction types
             if instruction.startswith('SEARCH:'):
                 query = instruction[7:].strip()
-                return self._execute_tfidf_search(query)
+                return self._search_data(query)
             
-            elif instruction.startswith('GET_ROW:'):
-                params = instruction[8:].strip().split()
-                if len(params) >= 2:
-                    sheet_name = params[0]
-                    try:
-                        row_number = int(params[1])
-                        return self._get_specific_row(sheet_name, row_number)
-                    except ValueError:
-                        return {'success': False, 'error': 'Invalid row number'}
-                        
-            elif instruction.startswith('GET_COLUMN:'):
-                params = instruction[11:].strip().split()
-                if len(params) >= 2:
-                    sheet_name = params[0]
-                    column_name = ' '.join(params[1:])
-                    return self._get_column_data(sheet_name, column_name)
+            elif instruction.startswith('READ_ROW:'):
+                params = instruction[9:].strip()
+                return self._read_row(params)
             
-            elif instruction.startswith('CALCULATE:'):
-                query = instruction[10:].strip()
-                return self._calculate_from_search(query)
+            elif instruction.startswith('READ_CELL:'):
+                params = instruction[11:].strip()
+                return self._read_cell(params)
             
-            elif instruction.startswith('FIND:'):
-                query = instruction[5:].strip()
-                return self._execute_tfidf_search(query)
+            elif instruction.startswith('EDIT_CELL:'):
+                params = instruction[11:].strip()
+                return self._edit_cell(params)
+            
+            elif instruction.startswith('EDIT_ROW:'):
+                params = instruction[10:].strip()
+                return self._edit_row(params)
+            
+            elif instruction.startswith('INSERT_ROW:'):
+                params = instruction[12:].strip()
+                return self._insert_row(params)
+            
+            elif instruction.startswith('DELETE_ROW:'):
+                params = instruction[12:].strip()
+                return self._delete_row(params)
+            
+            elif instruction.startswith('FIND_AND_REPLACE:'):
+                params = instruction[17:].strip()
+                return self._find_and_replace(params)
+            
+            elif instruction.startswith('GET_STRUCTURE:'):
+                return self._get_structure()
             
             else:
-                # Default to TF-IDF search
-                return self._execute_tfidf_search(instruction)
+                # Default to search
+                return self._search_data(instruction)
                 
         except Exception as e:
             return {'success': False, 'error': f"Error executing instruction: {str(e)}"}
     
-    def _execute_tfidf_search(self, query: str) -> Dict[str, Any]:
-        """Execute TF-IDF search based on query"""
-        search_results = self.search_engine.search(query, top_k=5)
+    def _search_data(self, query: str) -> Dict[str, Any]:
+        """Search for data using TF-IDF"""
+        results = self.search_engine.search(query, top_k=5)
         
-        if not search_results:
+        if not results:
             return {'success': False, 'error': f"No results found for: {query}"}
         
-        # Return only essential data
         formatted_results = []
-        for result in search_results:
-            relevant_data = {k: v for k, v in result['row_data'].items() 
-                           if not k.startswith('_') and v and str(v).strip()}
+        for result in results:
+            clean_data = {k: v for k, v in result['row_data'].items() 
+                         if not k.startswith('_') and v and str(v).strip()}
             
             formatted_results.append({
-                'location': f"{result['file_name']}/{result['sheet_name']}/Row {result['row_index']+1}",
+                'location': f"{result['file_name']}/{result['sheet_name']}/Row {result['excel_row']}",
                 'score': f"{result['similarity_score']:.3f}",
-                'data': relevant_data
+                'data': clean_data,
+                'metadata': {
+                    'file_name': result['file_name'],
+                    'sheet_name': result['sheet_name'],
+                    'row_number': result['excel_row']
+                }
             })
         
         return {
@@ -236,474 +353,519 @@ class OnDemandDataEngine:
             'type': 'search_results',
             'results': formatted_results,
             'query': query,
-            'count': len(search_results)
+            'count': len(results)
         }
     
-    def _get_specific_row(self, sheet_name: str, row_number: int) -> Dict[str, Any]:
-        """Get specific row using openpyxl metadata"""
+    def _read_row(self, params: str) -> Dict[str, Any]:
+        """Read specific row: 'filename sheetname rownumber'"""
+        parts = params.split()
+        if len(parts) < 3:
+            return {'success': False, 'error': 'Invalid parameters. Use: filename sheetname rownumber'}
+        
+        file_name = parts[0]
+        sheet_name = parts[1]
+        try:
+            row_number = int(parts[2])
+        except ValueError:
+            return {'success': False, 'error': 'Invalid row number'}
+        
+        # Find the row in metadata
         for metadata in self.search_engine.row_metadata:
-            if (metadata['sheet_name'].lower() == sheet_name.lower() and 
-                metadata['row_data'].get('_row_number') == row_number):
+            if (metadata['file_name'] == file_name and 
+                metadata['sheet_name'] == sheet_name and 
+                metadata['excel_row'] == row_number):
                 
                 clean_data = {k: v for k, v in metadata['row_data'].items() 
-                             if not k.startswith('_') and v and str(v).strip()}
+                             if not k.startswith('_')}
                 
                 return {
                     'success': True,
-                    'type': 'specific_row',
+                    'type': 'row_data',
                     'data': clean_data,
-                    'location': f"Row {row_number} from '{sheet_name}'"
+                    'location': f"{file_name}/{sheet_name}/Row {row_number}"
                 }
         
-        return {'success': False, 'error': f"Row {row_number} not found in {sheet_name}"}
+        return {'success': False, 'error': f"Row {row_number} not found in {file_name}/{sheet_name}"}
     
-    def _get_column_data(self, sheet_name: str, column_name: str) -> Dict[str, Any]:
-        """Get column data using openpyxl metadata"""
-        values = []
+    def _read_cell(self, params: str) -> Dict[str, Any]:
+        """Read specific cell: 'filename sheetname rownumber columnname'"""
+        parts = params.split()
+        if len(parts) < 4:
+            return {'success': False, 'error': 'Invalid parameters. Use: filename sheetname rownumber columnname'}
         
+        file_name = parts[0]
+        sheet_name = parts[1]
+        try:
+            row_number = int(parts[2])
+        except ValueError:
+            return {'success': False, 'error': 'Invalid row number'}
+        
+        column_name = ' '.join(parts[3:])
+        
+        # Get the workbook
+        if file_name not in self.search_engine.workbooks:
+            return {'success': False, 'error': f"File {file_name} not found"}
+        
+        workbook = self.search_engine.workbooks[file_name]
+        if sheet_name not in workbook.sheetnames:
+            return {'success': False, 'error': f"Sheet {sheet_name} not found"}
+        
+        sheet = workbook[sheet_name]
+        
+        # Find column by name
+        col_num = None
+        for col in range(1, sheet.max_column + 1):
+            header_cell = sheet.cell(row=1, column=col)
+            if header_cell.value and str(header_cell.value).strip() == column_name:
+                col_num = col
+                break
+        
+        if col_num is None:
+            return {'success': False, 'error': f"Column '{column_name}' not found"}
+        
+        # Read the cell
+        cell = sheet.cell(row=row_number, column=col_num)
+        cell_value = cell.value if cell.value is not None else ""
+        
+        return {
+            'success': True,
+            'type': 'cell_data',
+            'value': str(cell_value),
+            'location': f"{file_name}/{sheet_name}/Row {row_number}/{column_name}"
+        }
+    
+    def _edit_cell(self, params: str) -> Dict[str, Any]:
+        """Edit specific cell: 'filename sheetname rownumber columnname newvalue'"""
+        parts = params.split()
+        if len(parts) < 5:
+            return {'success': False, 'error': 'Invalid parameters. Use: filename sheetname rownumber columnname newvalue'}
+        
+        file_name = parts[0]
+        sheet_name = parts[1]
+        try:
+            row_number = int(parts[2])
+        except ValueError:
+            return {'success': False, 'error': 'Invalid row number'}
+        
+        column_name = parts[3]
+        new_value = ' '.join(parts[4:])
+        
+        # Get the workbook
+        if file_name not in self.search_engine.workbooks:
+            return {'success': False, 'error': f"File {file_name} not found"}
+        
+        workbook = self.search_engine.workbooks[file_name]
+        if sheet_name not in workbook.sheetnames:
+            return {'success': False, 'error': f"Sheet {sheet_name} not found"}
+        
+        sheet = workbook[sheet_name]
+        
+        # Find column by name
+        col_num = None
+        for col in range(1, sheet.max_column + 1):
+            header_cell = sheet.cell(row=1, column=col)
+            if header_cell.value and str(header_cell.value).strip() == column_name:
+                col_num = col
+                break
+        
+        if col_num is None:
+            return {'success': False, 'error': f"Column '{column_name}' not found"}
+        
+        # Get old value
+        cell = sheet.cell(row=row_number, column=col_num)
+        old_value = cell.value if cell.value is not None else ""
+        
+        # Try to convert to appropriate type
+        try:
+            if new_value.isdigit():
+                new_value = int(new_value)
+            elif new_value.replace('.', '').isdigit():
+                new_value = float(new_value)
+        except:
+            pass  # Keep as string
+        
+        # Edit the cell
+        cell.value = new_value
+        
+        # Save the workbook
+        file_path = self.search_engine.file_paths[file_name]
+        workbook.save(file_path)
+        
+        # Record edit history
+        edit_record = {
+            'timestamp': datetime.now().isoformat(),
+            'action': 'edit_cell',
+            'location': f"{file_name}/{sheet_name}/Row {row_number}/{column_name}",
+            'old_value': str(old_value),
+            'new_value': str(new_value)
+        }
+        self.edit_history.append(edit_record)
+        
+        # Update search engine data
+        self._update_search_data_after_edit(file_name, sheet_name, row_number, column_name, new_value)
+        
+        return {
+            'success': True,
+            'type': 'cell_edited',
+            'location': f"{file_name}/{sheet_name}/Row {row_number}/{column_name}",
+            'old_value': str(old_value),
+            'new_value': str(new_value)
+        }
+    
+    def _update_search_data_after_edit(self, file_name: str, sheet_name: str, row_number: int, column_name: str, new_value: Any):
+        """Update search engine data after edit"""
         for metadata in self.search_engine.row_metadata:
-            if metadata['sheet_name'].lower() == sheet_name.lower():
-                row_data = metadata['row_data']
-                # Find column with partial matching
-                matching_column = None
-                for col in row_data.keys():
-                    if column_name.lower() in col.lower():
-                        matching_column = col
-                        break
+            if (metadata['file_name'] == file_name and 
+                metadata['sheet_name'] == sheet_name and 
+                metadata['excel_row'] == row_number):
                 
-                if matching_column and row_data[matching_column] and str(row_data[matching_column]).strip():
-                    values.append({
-                        'row': row_data.get('_row_number', '?'),
-                        'value': row_data[matching_column]
-                    })
+                metadata['row_data'][column_name] = str(new_value)
+                break
         
-        if not values:
-            return {'success': False, 'error': f"Column '{column_name}' not found in {sheet_name}"}
+        # Update sheet data as well
+        if file_name in self.search_engine.sheet_data and sheet_name in self.search_engine.sheet_data[file_name]:
+            sheet_data = self.search_engine.sheet_data[file_name][sheet_name]
+            for row in sheet_data['data']:
+                if row.get('_row_number') == row_number:
+                    row[column_name] = str(new_value)
+                    break
         
-        # Limit results
-        display_values = values[:8]
+        # Rebuild search index
+        self.search_engine._build_search_index()
+    
+    def _edit_row(self, params: str) -> Dict[str, Any]:
+        """Edit entire row: 'filename sheetname rownumber column1:value1 column2:value2 ...'"""
+        parts = params.split()
+        if len(parts) < 4:
+            return {'success': False, 'error': 'Invalid parameters'}
+        
+        file_name = parts[0]
+        sheet_name = parts[1]
+        try:
+            row_number = int(parts[2])
+        except ValueError:
+            return {'success': False, 'error': 'Invalid row number'}
+        
+        # Parse column:value pairs
+        updates = {}
+        for part in parts[3:]:
+            if ':' in part:
+                col, val = part.split(':', 1)
+                updates[col] = val
+        
+        if not updates:
+            return {'success': False, 'error': 'No valid column:value pairs found'}
+        
+        results = []
+        for column_name, new_value in updates.items():
+            result = self._edit_cell(f"{file_name} {sheet_name} {row_number} {column_name} {new_value}")
+            results.append(result)
         
         return {
             'success': True,
-            'type': 'column_data',
-            'data': display_values,
-            'total_count': len(values),
-            'column_name': column_name,
-            'sheet_name': sheet_name
+            'type': 'row_edited',
+            'location': f"{file_name}/{sheet_name}/Row {row_number}",
+            'updates': len(updates),
+            'results': results
         }
     
-    def _calculate_from_search(self, query: str) -> Dict[str, Any]:
-        """Calculate statistics from search results"""
-        search_results = self.search_engine.search(query, top_k=20)
-        
-        if not search_results:
-            return {'success': False, 'error': f"No data found for calculation: {query}"}
-        
-        numeric_values = []
-        sources = []
-        
-        for result in search_results:
-            for key, value in result['row_data'].items():
-                if not key.startswith('_') and value:
-                    try:
-                        clean_value = str(value).replace(',', '').replace('$', '').replace('₹', '').strip()
-                        num_val = float(clean_value)
-                        numeric_values.append(num_val)
-                        sources.append({
-                            'value': num_val,
-                            'location': f"{result['file_name']}/{result['sheet_name']}/Row {result['row_index']+1}/{key}"
-                        })
-                    except:
-                        continue
-        
-        if not numeric_values:
-            return {'success': False, 'error': "No numeric values found for calculation"}
-        
-        stats = {
-            'count': len(numeric_values),
-            'sum': sum(numeric_values),
-            'average': sum(numeric_values) / len(numeric_values),
-            'min': min(numeric_values),
-            'max': max(numeric_values)
-        }
-        
+    def _get_structure(self) -> Dict[str, Any]:
+        """Get structure of all files"""
+        structure = self.search_engine.get_file_structure()
         return {
             'success': True,
-            'type': 'calculation',
-            'statistics': stats,
-            'sources_count': len(sources),
-            'query': query
+            'type': 'structure',
+            'data': structure
         }
-
-class ExcelProcessor:
-    """Excel processor that only provides structure info"""
     
-    def __init__(self):
-        self.max_rows_per_sheet = 100
-        self.max_chars_per_cell = 500
-        self.search_engine = SimpleTFIDFSearchEngine()
-        
-    def read_excel_file(self, file_content: bytes, file_name: str) -> Dict[str, Any]:
-        """Read Excel file from bytes content"""
-        try:
-            with tempfile.NamedTemporaryFile(suffix='.xlsx', delete=False) as tmp_file:
-                tmp_file.write(file_content)
-                tmp_path = tmp_file.name
-            
-            workbook = load_workbook(tmp_path, data_only=True)
-            
-            file_data = {
-                'file_name': file_name,
-                'sheets': {},
-                'summary': {
-                    'total_sheets': len(workbook.sheetnames),
-                    'sheet_names': workbook.sheetnames
-                }
-            }
-            
-            for sheet_name in workbook.sheetnames:
-                sheet_data = self._process_sheet(workbook[sheet_name], sheet_name)
-                file_data['sheets'][sheet_name] = sheet_data
-            
-            try:
-                os.unlink(tmp_path)
-            except:
-                pass
-                
-            return file_data
-            
-        except Exception as e:
-            logger.error(f"Error reading Excel file {file_name}: {str(e)}")
-            return {'error': f"Failed to read {file_name}: {str(e)}"}
+    def _insert_row(self, params: str) -> Dict[str, Any]:
+        """Insert new row (placeholder for future implementation)"""
+        return {'success': False, 'error': 'Insert row not yet implemented'}
     
-    def _process_sheet(self, sheet, sheet_name: str) -> Dict[str, Any]:
-        """Process sheet and store data for search"""
+    def _delete_row(self, params: str) -> Dict[str, Any]:
+        """Delete row (placeholder for future implementation)"""
+        return {'success': False, 'error': 'Delete row not yet implemented'}
+    
+    def _find_and_replace(self, params: str) -> Dict[str, Any]:
+        """Find and replace (placeholder for future implementation)"""
+        return {'success': False, 'error': 'Find and replace not yet implemented'}
+    
+    def get_edit_history(self) -> List[Dict[str, Any]]:
+        """Get edit history"""
+        return self.edit_history
+    
+    def save_files(self) -> Dict[str, Any]:
+        """Save all modified files"""
         try:
-            if sheet.max_row is None or sheet.max_row == 0:
-                return {
-                    'sheet_name': sheet_name,
-                    'summary': {'total_rows': 0, 'total_columns': 0, 'headers': []},
-                    'data': []
-                }
-            
-            max_row = min(sheet.max_row, self.max_rows_per_sheet + 1)
-            max_col = sheet.max_column or 0
-            
-            # Extract headers
-            headers = []
-            for col in range(1, max_col + 1):
-                cell_value = sheet.cell(row=1, column=col).value
-                if cell_value is not None:
-                    header = str(cell_value).strip()
-                    header = re.sub(r'[^\w\s]', '', header)
-                    header = re.sub(r'\s+', ' ', header)
-                    headers.append(header if header else f"Column_{col}")
-                else:
-                    headers.append(f"Column_{col}")
-            
-            # Extract data rows
-            data_rows = []
-            for row in range(2, max_row + 1):
-                row_data = {}
-                has_data = False
-                
-                for col, header in enumerate(headers, 1):
-                    cell_value = sheet.cell(row=row, column=col).value
-                    
-                    if cell_value is not None:
-                        cell_str = str(cell_value).strip()
-                        if len(cell_str) > self.max_chars_per_cell:
-                            cell_str = cell_str[:self.max_chars_per_cell] + "..."
-                        row_data[header] = cell_str
-                        has_data = True
-                    else:
-                        row_data[header] = ""
-                
-                if has_data:
-                    row_data['_row_number'] = row - 1
-                    data_rows.append(row_data)
-            
-            # Return only structure info
-            summary = {
-                'total_rows': len(data_rows),
-                'total_columns': len(headers),
-                'headers': headers
-            }
+            saved_files = []
+            for file_name, workbook in self.search_engine.workbooks.items():
+                file_path = self.search_engine.file_paths[file_name]
+                workbook.save(file_path)
+                saved_files.append(file_name)
             
             return {
-                'sheet_name': sheet_name,
-                'summary': summary,
-                'data': data_rows  # Store for search but don't expose
+                'success': True,
+                'saved_files': saved_files,
+                'count': len(saved_files)
             }
-            
         except Exception as e:
-            logger.error(f"Error processing sheet {sheet_name}: {str(e)}")
-            return {'error': f"Failed to process sheet {sheet_name}: {str(e)}"}
-    
-    def create_structure_only_summary(self, files_data: List[Dict[str, Any]]) -> str:
-        """Create structure-only summary for Gemini"""
-        summary_parts = []
-        
-        summary_parts.append("=== EXCEL FILES STRUCTURE (NO DATA PROVIDED) ===")
-        summary_parts.append(f"Total files: {len(files_data)}")
-        
-        # Build search index silently
-        self.search_engine.build_index(files_data)
-        total_rows = len(self.search_engine.documents)
-        summary_parts.append(f"Total indexed rows available for search: {total_rows}")
-        
-        for file_data in files_data:
-            if 'error' in file_data:
-                summary_parts.append(f"\n❌ {file_data.get('file_name', 'Unknown')}: {file_data['error']}")
-                continue
-                
-            file_name = file_data['file_name']
-            summary_parts.append(f"\n📁 FILE: {file_name}")
-            summary_parts.append(f"   Available sheets: {', '.join(file_data['summary']['sheet_names'])}")
-            
-            for sheet_name, sheet_data in file_data['sheets'].items():
-                if 'error' in sheet_data:
-                    summary_parts.append(f"   ❌ Sheet '{sheet_name}': {sheet_data['error']}")
-                    continue
-                    
-                summary = sheet_data['summary']
-                summary_parts.append(f"\n   📊 SHEET: {sheet_name}")
-                summary_parts.append(f"      Structure: {summary['total_rows']} rows × {summary['total_columns']} columns")
-                summary_parts.append(f"      Available columns: {', '.join(summary['headers'])}")
-        
-        summary_parts.append("\n🔍 TO GET ACTUAL DATA, USE THESE INSTRUCTIONS:")
-        summary_parts.append("- SEARCH: [query] - Search using TF-IDF")
-        summary_parts.append("- GET_ROW: [sheet_name] [row_number] - Get specific row")
-        summary_parts.append("- GET_COLUMN: [sheet_name] [column_name] - Get column data")
-        summary_parts.append("- CALCULATE: [query] - Calculate from search results")
-        summary_parts.append("- FIND: [query] - Find specific data")
-        summary_parts.append("\nNO ACTUAL DATA IS PROVIDED - YOU MUST SEARCH FOR EVERYTHING!")
-        
-        return "\n".join(summary_parts)
+            return {'success': False, 'error': f"Error saving files: {str(e)}"}
 
-class GeminiSearchDirector:
-    """Gemini that directs TF-IDF and openpyxl searches"""
+class GeminiInstructor:
+    """Gemini acts as intelligent instructor for Excel operations"""
     
-    def __init__(self, api_key: str, data_engine: OnDemandDataEngine):
+    def __init__(self, api_key: str, excel_editor: ExcelEditor):
         genai.configure(api_key=api_key)
         self.model = "gemini-2.0-flash-exp"
-        self.data_engine = data_engine
-        
-    def analyze_with_search_instructions(self, structure_summary: str, user_query: str = "") -> str:
-        """Gemini analyzes by instructing search operations"""
+        self.excel_editor = excel_editor
+    
+    def process_user_request(self, user_prompt: str, file_structure: Dict[str, Any]) -> str:
+        """Process user request and generate instructions for Excel editor"""
         try:
-            # Phase 1: Gemini plans search strategy
-            planning_prompt = f"""
-You are a data analyst with access to Excel files. You have ONLY the structure information below - NO actual data.
+            system_prompt = f"""
+You are an expert Excel AI instructor. You have access to Excel files through a specialized editing engine.
 
-{structure_summary}
+AVAILABLE FILES STRUCTURE:
+{json.dumps(file_structure, indent=2)}
 
-USER QUESTION: {user_query if user_query else "Analyze this Excel data"}
+AVAILABLE INSTRUCTIONS YOU CAN GIVE:
+1. SEARCH: [query] - Search for data using AI
+2. READ_ROW: [filename] [sheetname] [rownumber] - Read specific row
+3. READ_CELL: [filename] [sheetname] [rownumber] [columnname] - Read specific cell
+4. EDIT_CELL: [filename] [sheetname] [rownumber] [columnname] [newvalue] - Edit cell
+5. EDIT_ROW: [filename] [sheetname] [rownumber] [col1:val1] [col2:val2] - Edit multiple cells in row
+6. GET_STRUCTURE: - Get file structure
 
-You must instruct the TF-IDF search engine and openpyxl system to retrieve data. Available instructions:
+USER REQUEST: {user_prompt}
 
-- SEARCH: [query] - Use TF-IDF to find relevant data
-- GET_ROW: [sheet_name] [row_number] - Get specific row from sheet
-- GET_COLUMN: [sheet_name] [column_name] - Get all values from column  
-- CALCULATE: [query] - Find and calculate numeric data
-- FIND: [query] - Find specific information
+Your task:
+1. Understand what the user wants to do
+2. Plan the necessary Excel operations
+3. Generate specific instructions for the Excel editor
+4. Execute the instructions step by step
+5. Provide a comprehensive response
 
-Plan your search strategy and provide 4-5 specific search instructions to answer the user's question.
+Start by understanding the request and planning your approach. Then execute the necessary instructions.
 
 Format your response as:
-SEARCH STRATEGY: [explain your approach]
-
-SEARCH INSTRUCTIONS:
+UNDERSTANDING: [what you understand from the user request]
+PLAN: [your step-by-step plan]
+INSTRUCTIONS:
 1. [instruction 1]
-2. [instruction 2] 
-3. [instruction 3]
-4. [instruction 4]
-5. [instruction 5]
+2. [instruction 2]
+...
 
-Remember: You have NO data yet - you must search for everything!
+Then I'll execute these instructions and analyze the results.
 """
 
             model = genai.GenerativeModel(self.model)
-            planning_response = model.generate_content(planning_prompt)
+            planning_response = model.generate_content(system_prompt)
             
-            # Extract search instructions
-            search_instructions = self._extract_search_instructions(planning_response.text)
+            # Extract instructions
+            instructions = self._extract_instructions(planning_response.text)
             
-            # Phase 2: Execute search instructions
-            retrieved_data = ""
-            if search_instructions:
-                retrieved_data = "\n📊 SEARCH EXECUTION RESULTS:\n"
+            # Execute instructions
+            execution_results = ""
+            if instructions:
+                execution_results = "\n🔧 EXECUTION RESULTS:\n"
                 
-                for i, instruction in enumerate(search_instructions[:5], 1):
-                    retrieved_data += f"\n🔍 Instruction {i}: {instruction}\n"
+                for i, instruction in enumerate(instructions, 1):
+                    execution_results += f"\n📋 Instruction {i}: {instruction}\n"
                     
-                    result = self.data_engine.execute_search_instruction(instruction)
-                    formatted_result = self._format_search_result(result)
-                    retrieved_data += f"Result: {formatted_result}\n"
+                    result = self.excel_editor.execute_instruction(instruction)
+                    formatted_result = self._format_result(result)
+                    execution_results += f"✅ Result: {formatted_result}\n"
             
-            # Phase 3: Final analysis with retrieved data
-            if retrieved_data:
+            # Final analysis
+            if execution_results:
                 analysis_prompt = f"""
-You planned this search strategy:
+Your initial planning:
 {planning_response.text}
 
-Here are the results from your search instructions:
-{retrieved_data}
+Execution results:
+{execution_results}
 
-Now provide comprehensive analysis using ONLY the data you retrieved above. 
+Now provide a comprehensive response to the user that includes:
+1. Summary of what was accomplished
+2. Key findings from the data
+3. Any changes made to the Excel files
+4. Specific details with numbers and locations
+5. Recommendations or next steps
 
-Provide:
-1. Direct answers to the user's question
-2. Key insights from the retrieved data
-3. Specific findings with exact numbers and locations
-4. Data-driven recommendations
-5. Any patterns or trends you discovered
-
-Reference only the specific data you retrieved through your search instructions.
+Make it clear and actionable for the user.
 """
                 
                 final_response = model.generate_content(analysis_prompt)
                 
                 return f"""
-🎯 SEARCH STRATEGY & EXECUTION:
+🎯 PLANNING & UNDERSTANDING:
 {planning_response.text}
 
-{retrieved_data}
+{execution_results}
 
-📈 ANALYSIS BASED ON RETRIEVED DATA:
+📊 COMPREHENSIVE ANALYSIS:
 {final_response.text}
 """
             else:
-                return f"{planning_response.text}\n\n❌ No data was successfully retrieved."
+                return f"{planning_response.text}\n\n❌ No instructions were successfully executed."
                 
         except Exception as e:
-            logger.error(f"Error in search-directed analysis: {str(e)}")
-            return f"Error in analysis: {str(e)}"
+            logger.error(f"Error in Gemini instruction: {str(e)}")
+            return f"Error processing request: {str(e)}"
     
-    def _extract_search_instructions(self, text: str) -> List[str]:
-        """Extract search instructions from Gemini's response"""
+    def _extract_instructions(self, text: str) -> List[str]:
+        """Extract instructions from Gemini's response"""
         instructions = []
         lines = text.split('\n')
         
+        in_instructions_section = False
         for line in lines:
             line = line.strip()
             
-            # Look for instruction patterns
-            if any(cmd in line.upper() for cmd in ['SEARCH:', 'GET_ROW:', 'GET_COLUMN:', 'CALCULATE:', 'FIND:']):
-                clean_instruction = line
-                # Remove numbering if present
-                clean_instruction = re.sub(r'^\d+\.\s*', '', clean_instruction)
-                instructions.append(clean_instruction.strip())
+            if 'INSTRUCTIONS:' in line.upper():
+                in_instructions_section = True
+                continue
+            
+            if in_instructions_section and line:
+                # Look for instruction patterns
+                if any(cmd in line.upper() for cmd in ['SEARCH:', 'READ_ROW:', 'READ_CELL:', 'EDIT_CELL:', 'EDIT_ROW:', 'GET_STRUCTURE:']):
+                    clean_instruction = line
+                    # Remove numbering if present
+                    clean_instruction = re.sub(r'^\d+\.\s*', '', clean_instruction)
+                    instructions.append(clean_instruction.strip())
+                elif line.startswith(('1.', '2.', '3.', '4.', '5.')):
+                    # Extract instruction from numbered list
+                    clean_instruction = re.sub(r'^\d+\.\s*', '', line)
+                    if any(cmd in clean_instruction.upper() for cmd in ['SEARCH:', 'READ_ROW:', 'READ_CELL:', 'EDIT_CELL:', 'EDIT_ROW:', 'GET_STRUCTURE:']):
+                        instructions.append(clean_instruction.strip())
         
-        return instructions[:5]  # Limit to 5 instructions
+        return instructions[:10]  # Limit to 10 instructions
     
-    def _format_search_result(self, result: Dict[str, Any]) -> str:
-        """Format search results for Gemini"""
+    def _format_result(self, result: Dict[str, Any]) -> str:
+        """Format execution results"""
         if not result.get('success', False):
-            return f"❌ {result.get('error', 'No data found')}"
+            return f"❌ {result.get('error', 'Unknown error')}"
         
         result_type = result.get('type', 'unknown')
         
         if result_type == 'search_results':
             results = result['results'][:3]  # Show top 3
-            formatted = f"✅ Found {result['count']} results:\n"
+            formatted = f"Found {result['count']} results:\n"
             for res in results:
                 formatted += f"   📍 {res['location']} (Score: {res['score']})\n"
-                # Show first 3 data items
                 data_items = list(res['data'].items())[:3]
                 data_str = ' | '.join([f"{k}: {v}" for k, v in data_items])
-                formatted += f"   📊 Data: {data_str}\n"
+                formatted += f"   📊 {data_str}\n"
             return formatted
         
-        elif result_type == 'specific_row':
+        elif result_type == 'row_data':
             data = result['data']
             if data:
-                data_items = list(data.items())[:5]  # Show first 5 fields
+                data_items = list(data.items())[:5]
                 data_str = ' | '.join([f"{k}: {v}" for k, v in data_items])
-                return f"✅ {result['location']}\n   📊 Data: {data_str}"
+                return f"Row data from {result['location']}: {data_str}"
             else:
-                return f"✅ {result['location']} - No data in this row"
+                return f"No data in {result['location']}"
         
-        elif result_type == 'column_data':
-            data = result['data'][:3]  # Show first 3 values
-            formatted = f"✅ Found {result['total_count']} values in column '{result['column_name']}'\n"
-            for item in data:
-                formatted += f"   Row {item['row']}: {item['value']}\n"
-            return formatted
+        elif result_type == 'cell_data':
+            return f"Cell value at {result['location']}: {result['value']}"
         
-        elif result_type == 'calculation':
-            stats = result['statistics']
-            return f"✅ Calculation from {result['sources_count']} values:\n   Sum: {stats['sum']:,.2f} | Avg: {stats['average']:,.2f} | Count: {stats['count']}"
+        elif result_type == 'cell_edited':
+            return f"✏️ Edited {result['location']}: '{result['old_value']}' → '{result['new_value']}'"
+        
+        elif result_type == 'row_edited':
+            return f"✏️ Edited {result['updates']} cells in {result['location']}"
+        
+        elif result_type == 'structure':
+            return f"File structure retrieved with {len(result['data'])} files"
         
         else:
-            return f"✅ Retrieved: {str(result)[:150]}..."
+            return f"✅ {str(result)[:100]}..."
 
 # Initialize session state
-if 'files_data' not in st.session_state:
-    st.session_state.files_data = []
-if 'structure_summary' not in st.session_state:
-    st.session_state.structure_summary = ""
-if 'llm_analysis' not in st.session_state:
-    st.session_state.llm_analysis = ""
-if 'search_results' not in st.session_state:
-    st.session_state.search_results = []
-if 'excel_processor' not in st.session_state:
-    st.session_state.excel_processor = ExcelProcessor()
-if 'data_engine' not in st.session_state:
-    st.session_state.data_engine = None
+if 'search_engine' not in st.session_state:
+    st.session_state.search_engine = ExcelSearchEngine()
+if 'excel_editor' not in st.session_state:
+    st.session_state.excel_editor = None
+if 'gemini_instructor' not in st.session_state:
+    st.session_state.gemini_instructor = None
+if 'files_loaded' not in st.session_state:
+    st.session_state.files_loaded = False
+if 'analysis_result' not in st.session_state:
+    st.session_state.analysis_result = ""
+if 'edit_history' not in st.session_state:
+    st.session_state.edit_history = []
 
-# Main App
+# API Key
+API_KEY = "AIzaSyCSDx-q3PgkvMQktdi4tScbT1wOLgZ9jQg"
+
 def main():
-    st.title("📊 On-Demand Excel AI Analyzer")
-    st.markdown("**Gemini instructs TF-IDF & openpyxl to search and retrieve data on-demand!**")
+    st.title("📊 AI Excel Editor - Gemini Instructor")
+    st.markdown("**Gemini understands your requests and instructs specialized ML models to search and edit Excel files perfectly!**")
     
     # Sidebar
     with st.sidebar:
-        st.header("🔧 Configuration")
+        st.header("🔧 System Status")
         
-        # API Key
-        api_key = st.text_input(
-            "🔑 Gemini API Key",
-            type="password",
-            help="Gemini will direct data searches"
-        )
-        
-        if api_key:
-            st.success("✅ Ready for directed search")
+        # File status
+        if st.session_state.files_loaded:
+            file_count = len(st.session_state.search_engine.workbooks)
+            row_count = len(st.session_state.search_engine.row_metadata)
+            st.success(f"✅ {file_count} files loaded")
+            st.info(f"📊 {row_count} rows indexed")
         else:
-            st.warning("⚠️ Enter Gemini API key")
+            st.warning("⚠️ No files loaded")
+        
+        # Editor status
+        if st.session_state.excel_editor:
+            edit_count = len(st.session_state.excel_editor.edit_history)
+            st.info(f"✏️ {edit_count} edits made")
         
         st.divider()
         
-        # Search Engine Status
-        st.header("🔍 Search Engine Status")
-        if st.session_state.data_engine:
-            indexed_rows = len(st.session_state.excel_processor.search_engine.documents)
-            st.metric("Indexed Rows", indexed_rows)
-            st.success("TF-IDF engine ready")
-        else:
-            st.info("Process files to enable search")
+        # Quick actions
+        st.header("🚀 Quick Actions")
+        if st.session_state.files_loaded:
+            if st.button("💾 Save All Changes"):
+                result = st.session_state.excel_editor.save_files()
+                if result['success']:
+                    st.success(f"✅ Saved {result['count']} files")
+                else:
+                    st.error(f"❌ {result['error']}")
+            
+            if st.button("📋 View Edit History"):
+                history = st.session_state.excel_editor.get_edit_history()
+                if history:
+                    st.write("**Recent Edits:**")
+                    for edit in history[-5:]:  # Show last 5 edits
+                        st.text(f"• {edit['action']}: {edit['location']}")
+                else:
+                    st.info("No edits made yet")
         
         st.divider()
         
-        # Manual search test
-        if st.session_state.data_engine:
-            st.header("🧪 Test Search Instructions")
-            test_instruction = st.text_input("Test instruction:", placeholder="SEARCH: revenue data")
-            if st.button("Execute"):
-                if test_instruction:
-                    result = st.session_state.data_engine.execute_search_instruction(test_instruction)
-                    if result.get('success'):
-                        st.success("✅ Search executed")
-                        st.json(result, expanded=False)
-                    else:
-                        st.error(f"❌ {result.get('error')}")
+        # Test instructions
+        if st.session_state.excel_editor:
+            st.header("🧪 Test Instructions")
+            test_instruction = st.text_input(
+                "Test instruction:",
+                placeholder="SEARCH: revenue data"
+            )
+            if st.button("Execute Test") and test_instruction:
+                result = st.session_state.excel_editor.execute_instruction(test_instruction)
+                if result['success']:
+                    st.success("✅ Executed successfully")
+                    st.json(result, expanded=False)
+                else:
+                    st.error(f"❌ {result['error']}")
         
         if st.button("🗑️ Clear All", type="secondary"):
-            for key in ['files_data', 'structure_summary', 'llm_analysis', 'search_results']:
-                st.session_state[key] = [] if 'results' in key or 'data' in key else ""
-            st.session_state.excel_processor = ExcelProcessor()
-            st.session_state.data_engine = None
+            for key in ['files_loaded', 'analysis_result', 'edit_history']:
+                if key in st.session_state:
+                    del st.session_state[key]
+            st.session_state.search_engine = ExcelSearchEngine()
+            st.session_state.excel_editor = None
+            st.session_state.gemini_instructor = None
             st.rerun()
     
     # Main content
@@ -712,240 +874,160 @@ def main():
     with col1:
         st.header("📁 Upload Excel Files")
         uploaded_files = st.file_uploader(
-            "Upload Excel files",
+            "Upload Excel files for AI analysis and editing",
             type=['xlsx', 'xls'],
-            accept_multiple_files=True
+            accept_multiple_files=True,
+            help="Upload Excel files that Gemini will analyze and edit"
         )
         
         if uploaded_files:
             st.success(f"📄 {len(uploaded_files)} file(s) ready")
+            
+            if st.button("🔄 Load Files", type="primary"):
+                with st.spinner("Loading and indexing Excel files..."):
+                    st.session_state.search_engine.load_excel_files(uploaded_files)
+                    st.session_state.excel_editor = ExcelEditor(st.session_state.search_engine)
+                    st.session_state.gemini_instructor = GeminiInstructor(API_KEY, st.session_state.excel_editor)
+                    st.session_state.files_loaded = True
+                    
+                st.success("✅ Files loaded and ready for AI operations!")
+                st.rerun()
     
     with col2:
-        st.header("❓ Your Analysis Question")
-        user_query = st.text_area(
-            "What do you want to analyze?",
-            placeholder="e.g., What are the key financial insights? Find revenue trends. Calculate total expenses.",
-            height=120
+        st.header("🤖 AI Request")
+        user_request = st.text_area(
+            "Tell Gemini what you want to do with your Excel files:",
+            placeholder="""Examples:
+• Find all revenue data and show me the totals
+• Edit the sales figures in Q1 sheet to increase by 10%
+• Search for customer information and update phone numbers
+• Find expenses above $1000 and highlight them
+• Add a new column for profit margins and calculate them""",
+            height=150
         )
+        
+        if st.button("🎯 Execute AI Request", type="primary", disabled=not (st.session_state.files_loaded and user_request)):
+            with st.spinner("🤖 Gemini is understanding your request and instructing the Excel editor..."):
+                try:
+                    file_structure = st.session_state.search_engine.get_file_structure()
+                    result = st.session_state.gemini_instructor.process_user_request(user_request, file_structure)
+                    st.session_state.analysis_result = result
+                    st.success("✅ AI request completed!")
+                except Exception as e:
+                    st.error(f"❌ Error: {str(e)}")
     
-    # Action buttons
-    st.divider()
-    col1, col2, col3 = st.columns([1, 1, 1])
-    
-    with col1:
-        process_button = st.button(
-            "🚀 Index Files",
-            type="primary",
-            disabled=not uploaded_files,
-            help="Process files and build search index"
-        )
-    
-    with col2:
-        analyze_button = st.button(
-            "🎯 Gemini Search & Analyze",
-            type="primary",
-            disabled=not (st.session_state.structure_summary and api_key),
-            help="Gemini will direct TF-IDF searches"
-        )
-    
-    with col3:
-        if st.session_state.data_engine:
-            indexed_count = len(st.session_state.excel_processor.search_engine.documents)
-            st.metric("Ready for Search", indexed_count)
-        else:
-            st.metric("Ready for Search", 0)
-    
-    # Process files
-    if process_button and uploaded_files:
-        with st.spinner("🔄 Processing files and building search index..."):
-            files_data = []
+    # Excel File Viewer
+    if st.session_state.files_loaded:
+        st.divider()
+        st.header("📊 Excel File Viewer")
+        
+        # File and sheet selector
+        file_names = list(st.session_state.search_engine.workbooks.keys())
+        selected_file = st.selectbox("Select File:", file_names)
+        
+        if selected_file:
+            sheet_names = list(st.session_state.search_engine.sheet_data[selected_file].keys())
+            selected_sheet = st.selectbox("Select Sheet:", sheet_names)
             
-            progress_bar = st.progress(0)
-            status_text = st.empty()
-            
-            for i, uploaded_file in enumerate(uploaded_files):
-                status_text.text(f"Processing {uploaded_file.name}...")
-                progress_bar.progress((i + 1) / len(uploaded_files))
+            if selected_sheet:
+                # Display sheet data
+                df = st.session_state.search_engine.get_sheet_dataframe(selected_file, selected_sheet)
                 
-                file_content = uploaded_file.read()
-                file_data = st.session_state.excel_processor.read_excel_file(file_content, uploaded_file.name)
-                files_data.append(file_data)
-            
-            st.session_state.files_data = files_data
-            st.session_state.structure_summary = st.session_state.excel_processor.create_structure_only_summary(files_data)
-            
-            # Initialize search engine
-            st.session_state.data_engine = OnDemandDataEngine(st.session_state.excel_processor)
-            
-            progress_bar.progress(1.0)
-            status_text.text("✅ Search index ready for Gemini instructions!")
-            
-            indexed_rows = len(st.session_state.excel_processor.search_engine.documents)
-            st.success(f"🔍 Indexed {indexed_rows} rows ready for on-demand search!")
-    
-    # Gemini directs searches
-    if analyze_button and st.session_state.structure_summary and api_key:
-        with st.spinner("🤖 Gemini is planning and executing search strategy..."):
-            try:
-                if not st.session_state.data_engine:
-                    st.session_state.data_engine = OnDemandDataEngine(st.session_state.excel_processor)
-                
-                gemini_director = GeminiSearchDirector(api_key, st.session_state.data_engine)
-                
-                analysis = gemini_director.analyze_with_search_instructions(
-                    st.session_state.structure_summary, 
-                    user_query
-                )
-                st.session_state.llm_analysis = analysis
-                st.success("✅ Gemini completed search-directed analysis!")
-            except Exception as e:
-                st.error(f"❌ Error: {str(e)}")
+                if not df.empty:
+                    st.subheader(f"📋 {selected_file} / {selected_sheet}")
+                    
+                    # Show basic info
+                    col1, col2, col3 = st.columns(3)
+                    col1.metric("Rows", len(df))
+                    col2.metric("Columns", len(df.columns))
+                    col3.metric("Total Cells", len(df) * len(df.columns))
+                    
+                    # Display the dataframe
+                    st.dataframe(
+                        df,
+                        use_container_width=True,
+                        height=400
+                    )
+                    
+                    # Download option
+                    csv = df.to_csv(index=False)
+                    st.download_button(
+                        "📥 Download as CSV",
+                        data=csv,
+                        file_name=f"{selected_file}_{selected_sheet}.csv",
+                        mime="text/csv"
+                    )
+                else:
+                    st.info("No data to display in this sheet")
     
     # Results
-    if st.session_state.structure_summary or st.session_state.llm_analysis:
+    if st.session_state.analysis_result:
         st.divider()
-        st.header("📊 Results")
+        st.header("🎯 AI Analysis Results")
         
-        tab1, tab2, tab3 = st.tabs(["📋 File Structure", "🎯 Gemini Analysis", "🔍 Search Testing"])
+        st.markdown(st.session_state.analysis_result)
         
-        with tab1:
-            if st.session_state.structure_summary:
-                st.subheader("📊 Excel File Structure (No Data)")
-                st.text_area(
-                    "Structure available to Gemini",
-                    value=st.session_state.structure_summary,
-                    height=400,
-                    disabled=True
-                )
-                
-                st.info("👆 This is ALL Gemini sees initially - no actual data!")
-                
-                st.download_button(
-                    "📥 Download Structure",
-                    data=st.session_state.structure_summary,
-                    file_name="excel_structure_only.txt",
-                    mime="text/plain"
-                )
-            else:
-                st.info("👆 Process Excel files first")
+        # Download results
+        st.download_button(
+            "📥 Download Analysis Report",
+            data=st.session_state.analysis_result,
+            file_name="ai_excel_analysis.txt",
+            mime="text/plain"
+        )
+    
+    # Instructions and Examples
+    if not st.session_state.files_loaded:
+        st.divider()
+        st.header("💡 How It Works")
         
-        with tab2:
-            if st.session_state.llm_analysis:
-                st.subheader("🎯 Gemini's Search-Directed Analysis")
-                st.markdown(st.session_state.llm_analysis)
-                
-                st.info("👆 Gemini planned searches, executed them via TF-IDF/openpyxl, then analyzed the results!")
-                
-                st.download_button(
-                    "📥 Download Analysis",
-                    data=st.session_state.llm_analysis,
-                    file_name="gemini_search_analysis.txt",
-                    mime="text/plain"
-                )
-            else:
-                st.info("👆 Run Gemini analysis to see search-directed insights")
+        col1, col2 = st.columns(2)
         
-        with tab3:
-            if st.session_state.data_engine:
-                st.subheader("🔍 Test Search Instructions")
-                st.markdown("**Test the same search instructions Gemini uses:**")
-                
-                # Instruction examples
-                example_instructions = [
-                    "SEARCH: revenue data",
-                    "GET_ROW: Balance_Sheet 1",
-                    "GET_COLUMN: Income_Statement Revenue",
-                    "CALCULATE: total expenses",
-                    "FIND: accommodation costs"
-                ]
-                
-                selected_instruction = st.selectbox(
-                    "Choose instruction to test:",
-                    [""] + example_instructions + ["Custom..."]
-                )
-                
-                if selected_instruction == "Custom...":
-                    custom_instruction = st.text_input("Enter custom instruction:")
-                    test_instruction = custom_instruction
-                else:
-                    test_instruction = selected_instruction
-                
-                col1, col2 = st.columns([1, 3])
-                
-                with col1:
-                    if st.button("🔍 Execute Instruction") and test_instruction:
-                        result = st.session_state.data_engine.execute_search_instruction(test_instruction)
-                        
-                        if result.get('success'):
-                            st.success("✅ Instruction executed")
-                        else:
-                            st.error(f"❌ {result.get('error')}")
-                
-                with col2:
-                    if test_instruction:
-                        st.write(f"**Testing:** `{test_instruction}`")
-                
-                # Show result if there's one
-                if st.button("🔍 Execute Instruction") and test_instruction:
-                    with st.spinner("Executing search instruction..."):
-                        result = st.session_state.data_engine.execute_search_instruction(test_instruction)
-                        
-                        if result.get('success'):
-                            st.subheader("📊 Search Result:")
-                            
-                            result_type = result.get('type', 'unknown')
-                            
-                            if result_type == 'search_results':
-                                st.write(f"**Found {result['count']} results:**")
-                                for i, res in enumerate(result['results'], 1):
-                                    with st.expander(f"Result {i} - {res['location']} (Score: {res['score']})"):
-                                        st.json(res['data'])
-                            
-                            elif result_type == 'specific_row':
-                                st.write(f"**Location:** {result['location']}")
-                                if result['data']:
-                                    st.json(result['data'])
-                                else:
-                                    st.write("No data in this row")
-                            
-                            elif result_type == 'column_data':
-                                st.write(f"**Column:** {result['column_name']} from {result['sheet_name']}")
-                                st.write(f"**Total values:** {result['total_count']}")
-                                if result['data']:
-                                    df = pd.DataFrame(result['data'])
-                                    st.dataframe(df)
-                            
-                            elif result_type == 'calculation':
-                                st.write("**Calculation Results:**")
-                                stats = result['statistics']
-                                col1, col2, col3 = st.columns(3)
-                                col1.metric("Sum", f"{stats['sum']:,.2f}")
-                                col2.metric("Average", f"{stats['average']:,.2f}")
-                                col3.metric("Count", stats['count'])
-                        else:
-                            st.error(f"❌ Error: {result.get('error')}")
-                
-                st.divider()
-                
-                st.subheader("💡 Available Search Instructions")
-                st.markdown("""
-                **Instructions that Gemini can use:**
-                
-                - `SEARCH: [query]` - TF-IDF search for relevant data
-                - `GET_ROW: [sheet_name] [row_number]` - Get specific row
-                - `GET_COLUMN: [sheet_name] [column_name]` - Get column data
-                - `CALCULATE: [query]` - Find and calculate numeric data
-                - `FIND: [query]` - Find specific information
-                
-                **Examples:**
-                - `SEARCH: accommodation expenses` - Find accommodation-related entries
-                - `GET_ROW: Balance_Sheet 5` - Get row 5 from Balance Sheet
-                - `GET_COLUMN: Income_Statement Revenue` - Get all Revenue values
-                - `CALCULATE: total expenses august` - Calculate total expenses
-                - `FIND: highest revenue` - Find highest revenue entries
-                """)
-            else:
-                st.info("👆 Process Excel files first to enable search testing")
+        with col1:
+            st.subheader("🔄 Process Flow")
+            st.markdown("""
+            1. **Upload Excel files** - Your data is loaded and indexed
+            2. **Make AI request** - Tell Gemini what you want to do
+            3. **Gemini understands** - Analyzes your request intelligently  
+            4. **ML model executes** - Specialized engine searches and edits
+            5. **View results** - See changes and analysis in real-time
+            """)
+        
+        with col2:
+            st.subheader("🤖 AI Capabilities")
+            st.markdown("""
+            **Search & Analysis:**
+            - Find specific data using natural language
+            - Calculate totals, averages, trends
+            - Identify patterns and insights
+            
+            **Editing & Modification:**
+            - Edit individual cells or entire rows
+            - Update values based on conditions
+            - Apply formulas and calculations
+            
+            **Intelligence:**
+            - Understands context and intent
+            - Handles complex multi-step operations
+            - Provides detailed explanations
+            """)
+        
+        st.subheader("📝 Example Requests")
+        st.markdown("""
+        **Analysis Requests:**
+        - "Show me all revenue data from Q1 and calculate the total"
+        - "Find customers with outstanding balances over $5000"
+        - "What are the top 5 products by sales volume?"
+        
+        **Editing Requests:**
+        - "Update all prices in the product sheet by increasing them 5%"
+        - "Change the status of all pending orders to 'confirmed'"
+        - "Add a new column for profit margin and calculate it for each product"
+        
+        **Complex Operations:**
+        - "Find all employees in the sales department and update their commission rate to 8%"
+        - "Identify duplicate customer entries and merge them"
+        - "Calculate year-over-year growth for each product category"
+        """)
 
 if __name__ == "__main__":
     main()
